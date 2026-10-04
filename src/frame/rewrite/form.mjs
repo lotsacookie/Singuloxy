@@ -1,80 +1,57 @@
 import { ctx, convert_url } from "../context.mjs";
-import * as parser from "../parser.mjs";
 import * as loader from "../loader.mjs";
 
-const form_action_html = `
-  <!DOCTYPE html>
-  <style>
-    html {
-      background-color: rgb(34, 34, 34);
-    }
-  <\/style>
-  <script>
-    let original_url = "__ORIGINAL_URL__";
-    let frame_id = "__FRAME_ID__";
-    window.onload = () => {
-      let url_params = new URLSearchParams(document.body.textContent);
-      let new_url = original_url;
-      let post_data = null;
-      document.body.textContent = "";
+function build_request(form_element) {
+  let method = (form_element.getAttribute("method") || "get").toLowerCase();
+  let action = form_element.getAttribute("action");
+  if (!action) action = ctx.location.href;
+  let target_url = convert_url(action, ctx.location.href);
 
-      if (url_params.get("__form_method") === "post") {
-        post_data = {
-          method: url_params.get("__form_method"),
-          enctype: url_params.get("__form_enctype")
-        };
-        url_params.delete("__form_method");
-        url_params.delete("__form_enctype");
-        post_data.body = url_params.toString();
-      }
-      else {
-        new_url += String.fromCharCode(63) + url_params.toString();
-      }
-      
-      top.postMessage({
-        type: "procedure",
-        id: Math.random() + "",
-        procedure: "navigate",
-        arguments: [frame_id, new_url, true, post_data]
-      }, {targetOrigin: "*"});
-    }
-  <\/script>
-`;
+  let form_data = new FormData(form_element);
 
-function create_hidden_input(name, value) {
-  let hidden_input = document.createElement("input");
-  hidden_input.type = "hidden";
-  hidden_input.name = name;
-  hidden_input.value = value;
-  return hidden_input;
+  if (method === "post") {
+    let enctype = form_element.getAttribute("enctype") || "application/x-www-form-urlencoded";
+    let body;
+
+    if (enctype === "multipart/form-data") {
+      body = [...form_data.entries()];
+    }
+    else {
+      let params = new URLSearchParams();
+      for (let [key, value] of form_data.entries()) {
+        if (typeof value === "string") params.append(key, value);
+      }
+      body = params.toString();
+      if (enctype !== "text/plain") enctype = "application/x-www-form-urlencoded";
+    }
+
+    return {
+      url: target_url,
+      form_data: { method: "post", enctype, body }
+    };
+  }
+
+  let url_obj = new URL(target_url);
+  for (let [key, value] of form_data.entries()) {
+    if (typeof value === "string") url_obj.searchParams.set(key, value);
+  }
+  return { url: url_obj.href, form_data: null };
+}
+
+function perform_submit(form_element) {
+  let { url, form_data } = build_request(form_element);
+  loader.navigate(loader.frame_id, url, true, form_data);
 }
 
 export function rewrite_form(form_element) {
-  function convert_action(action) {
-    let url = convert_url(action, ctx.location.href);
-    let new_html = form_action_html
-      .replace("__ORIGINAL_URL__", url)
-      .replace("__FRAME_ID__", loader.frame_id);
-    return `data:text/html,${new_html}`;
-  }
+  form_element.addEventListener("submit", (event) => {
+    if (event.defaultPrevented) return;
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    perform_submit(form_element);
+  });
 
-  form_element.setAttribute = new Proxy(form_element.setAttribute, {
-    apply(target, this_arg, args) {
-      if (args[0] === "action" && !args[1].startsWith("data:")) {
-        args[1] = convert_action(args[1]);
-      }
-      return target.apply(this_arg, args);
-    },
-  })
-
-  let current_action = form_element.getAttribute("action");
-  if (!current_action) return;
-  form_element.setAttribute("action", current_action);
-
-  if (form_element.method === "post") {
-    form_element.method = "get";
-    form_element.append(create_hidden_input("__form_method", "post"));
-    form_element.append(create_hidden_input("__form_enctype", form_element.enctype));
-  }
-  form_element.setAttribute("method", "get");
+  form_element.submit = () => {
+    perform_submit(form_element);
+  };
 }
