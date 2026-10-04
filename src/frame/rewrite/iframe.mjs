@@ -1,4 +1,4 @@
-import { ctx, convert_url, intercept_property, proxy_function } from "../context.mjs";
+import { ctx, convert_url, intercept_property, proxy_function, get_cookie_jar } from "../context.mjs";
 import * as network from "../network.mjs";
 import * as loader from "../loader.mjs";
 import * as util from "../../util.mjs";
@@ -9,12 +9,11 @@ export function rewrite_iframe(iframe_element) {
   let iframe_url = "";
 
   let fetch_src = async (value) => {
-    //download the proxied html
     iframe_element.setAttribute("__src", value);
     iframe_url = convert_url(value, ctx.location.href);
     console.log("navigating iframe to", iframe_url);
     let final_url = iframe_url;
-    let error; //possible network error
+    let error;
     let html;
     try {
       let response = await network.fetch(iframe_url);
@@ -25,7 +24,6 @@ export function rewrite_iframe(iframe_element) {
       error = util.format_error(e);
     }
     
-    //load the frame runtime
     let loader_blob = new Blob([loader.frame_html], {type: "text/html"});
     iframe_element.src = network.create_blob_url(loader_blob);
     await new Promise((resolve) => {
@@ -35,12 +33,10 @@ export function rewrite_iframe(iframe_element) {
       });
     })
     
-    //create the rpc message channel
     let msg_channel = new MessageChannel();
     rpc.attach_host(msg_channel.port1);
     rpc.set_host(iframe_element, msg_channel.port2);
 
-    //create additional rpc target for sending the html
     let msg_channel_2 = new MessageChannel();
     let rpc_target = new rpc.RPCTarget(msg_channel_2.port1);
     rpc_target.onmessage = rpc.message_listener;
@@ -48,7 +44,6 @@ export function rewrite_iframe(iframe_element) {
     rpc.set_host(iframe_element, msg_channel_2.port2);
     let send_page = rpc.create_rpc_wrapper(rpc_target, "html");
 
-    //load persisted local storage if needed
     let iframe_origin = new URL(iframe_url).origin;
     let local_storage;
     let cookies;
@@ -69,7 +64,7 @@ export function rewrite_iframe(iframe_element) {
         settings: {},
         default_settings: loader.default_settings,
         version: loader.version,
-        iframe: true
+        is_iframe: true
       });
     }
     catch (error) {
@@ -80,9 +75,11 @@ export function rewrite_iframe(iframe_element) {
         frame_id: frame_id,
         error: error_msg,
         local_storage: undefined,
+        cookies: undefined,
         settings: {},
         default_settings: loader.default_settings,
-        version: loader.version
+        version: loader.version,
+        is_iframe: true
       });
     }
 
