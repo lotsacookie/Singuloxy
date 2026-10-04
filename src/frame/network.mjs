@@ -70,8 +70,9 @@ export async function fetch(url, options) {
     fetch_data = await rpc_fetch(url.href, options);
   }
   catch (e) {
-    console.error("sandstone: proxied fetch failed:", url.href, e);
-    throw new TypeError("Failed to fetch " + url.href);
+    let reason = e?.message ?? String(e);
+    console.error("sandstone: proxied fetch failed:", url.href, reason);
+    throw new TypeError("Failed to fetch " + url.href + " (" + reason + ")");
   }
   let response = new Response(fetch_data.body);
   for (let key in fetch_data.items) {
@@ -99,6 +100,12 @@ export function create_blob_url(blob, target_url = null) {
   return url;
 }
 
+function to_bytes(data) {
+  if (data instanceof ArrayBuffer) return new Uint8Array(data);
+  if (ArrayBuffer.isView(data)) return new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
+  return new Uint8Array(data);
+}
+
 export class WebSocket extends EventTarget {
   static CONNECTING = 0;
   static OPEN = 1;
@@ -106,6 +113,7 @@ export class WebSocket extends EventTarget {
   static CLOSED = 3;
 
   #ws_id;
+  #close_requested;
 
   constructor(url, protocols=[]) {
     super();
@@ -113,7 +121,11 @@ export class WebSocket extends EventTarget {
     let url_obj = new URL(url, ctx.location.href);
     url_obj.protocol = url_obj.protocol.replace("http", "ws");
     this.url = url_obj.href;
-    this.protocols = Array.isArray(protocols) ? protocols : [protocols];
+
+    let protocol_list = protocols === undefined || protocols === null ? [] : protocols;
+    protocol_list = Array.isArray(protocol_list) ? protocol_list : [protocol_list];
+    this.protocols = protocol_list.map(String).filter((item) => item.length > 0);
+
     this.protocol = "";
     this.extensions = "";
     this.binaryType = "blob";
@@ -131,6 +143,7 @@ export class WebSocket extends EventTarget {
     this.readyState = this.CONNECTING;
 
     this.#ws_id = null;
+    this.#close_requested = false;
     this.#connect();
   }
 
@@ -140,60 +153,91 @@ export class WebSocket extends EventTarget {
       "User-Agent": navigator.userAgent,
     };
 
+    let ws_id;
     try {
-      this.#ws_id = await rpc_ws_new(loader.frame_id, this.url, this.protocols, {
+      ws_id = await rpc_ws_new(loader.frame_id, this.url, this.protocols, {
         headers: headers
       });
     }
     catch (e) {
-      console.error("sandstone: websocket connect failed", e);
+      console.error("sandstone: websocket connect failed", this.url, e?.message ?? e);
       this.#forward_event("error", null);
-      this.#forward_event("close", null);
+      this.#forward_event("close", 1006);
       return;
+    }
+
+    this.#ws_id = ws_id;
+    if (this.#close_requested) {
+      rpc_ws_close(loader.frame_id, this.#ws_id).catch(() => {});
     }
     this.#event_loop();
   }
 
   async #event_loop() {
     while (true) {
-      let events = await rpc_ws_event(loader.frame_id, this.#ws_id);
+      let events;
+      try {
+        events = await rpc_ws_event(loader.frame_id, this.#ws_id);
+      }
+      catch (e) {
+        this.#forward_event("error", null);
+        break;
+      }
       if (!events) break;
+
+      let closed = false;
       for (let [event_name, data] of events) {
         this.#forward_event(event_name, data);
+        if (event_name === "close") closed = true;
       }
+      if (closed) break;
     }
+
+    this.#forward_event("close", 1006);
   }
 
   #forward_event(event_name, data) {
     if (event_name === "open") {
+      if (this.readyState !== this.CONNECTING) return;
       this.readyState = this.OPEN;
       this.#dispatch_event(new Event("open"));
     }
     else if (event_name === "close") {
+      if (this.readyState === this.CLOSED) return;
       this.readyState = this.CLOSED;
-      this.#dispatch_event(new CloseEvent("close"));
+      let code = Number.isInteger(data) && data >= 1000 && data < 5000 ? data : 1006;
+      this.#dispatch_event(new CloseEvent("close", {code: code, wasClean: code === 1000}));
     }
     else if (event_name === "message") {
+      if (this.readyState === this.CLOSED) return;
       let converted;
-      if (typeof data === "string")
+      if (typeof data === "string") {
         converted = data;
-      else if (this.binaryType == "arraybuffer") 
-        converted = data.buffer;
-      else 
-        converted = new Blob([data]);
+      }
+      else {
+        let bytes = to_bytes(data);
+        if (this.binaryType === "arraybuffer")
+          converted = bytes.slice().buffer;
+        else
+          converted = new Blob([bytes]);
+      }
       this.#dispatch_event(new MessageEvent("message", {data: converted}));
     }
     else if (event_name === "error") {
+      if (this.readyState === this.CLOSED) return;
       this.#dispatch_event(new Event("error"));
     }
   }
 
   #dispatch_event(event) {
-    try {
-      this["on" + event.type](event);
-    }
-    catch (e) {
-      console.error(e);
+    let handler = this["on" + event.type];
+    if (typeof handler === "function") {
+      try {
+        handler.call(this, event);
+      }
+      catch (e) {
+        console.error(e);
+      }
     }
     this.dispatchEvent(event);
   }
@@ -202,7 +246,7 @@ export class WebSocket extends EventTarget {
     if (this.readyState === this.CONNECTING) {
       throw new DOMException("Websocket not ready yet.", "InvalidStateError");
     }
-    if (this.readyState === this.CLOSED) {
+    if (this.readyState !== this.OPEN) {
       return;
     }
 
@@ -213,16 +257,20 @@ export class WebSocket extends EventTarget {
       })();
     }
     else if (typeof data === "string") {
-      rpc_ws_send(loader.frame_id, this.#ws_id, data);
+      rpc_ws_send(loader.frame_id, this.#ws_id, data).catch(() => {});
     }
     else {
       let converted = util.data_to_array(data);
-      rpc_ws_send(loader.frame_id, this.#ws_id, converted);
+      rpc_ws_send(loader.frame_id, this.#ws_id, converted).catch(() => {});
     }
   }
 
   close() {
+    if (this.readyState === this.CLOSING || this.readyState === this.CLOSED) return;
     this.readyState = this.CLOSING;
-    rpc_ws_close(loader.frame_id, this.#ws_id);
+    this.#close_requested = true;
+    if (this.#ws_id !== null) {
+      rpc_ws_close(loader.frame_id, this.#ws_id).catch(() => {});
+    }
   }
 }
