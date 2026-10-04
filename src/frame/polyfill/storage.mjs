@@ -14,12 +14,40 @@ export class FakeStorage {
       get: (target, key, receiver) => {
         if (typeof this[key] === "function")
           return this[key].bind(this);
-        if (this.#map.has(key)) 
+        if (typeof key === "string" && this.#map.has(key)) 
           return this.#map.get(key);
         return this[key];
       },
       set: (target, key, value) => {
+        if (typeof key === "symbol")
+          return Reflect.set(target, key, value);
         this.setItem(key, value);
+        return true;
+      },
+      deleteProperty: (target, key) => {
+        if (typeof key === "symbol")
+          return Reflect.deleteProperty(target, key);
+        this.removeItem(key);
+        return true;
+      },
+      has: (target, key) => {
+        if (typeof key === "string" && this.#map.has(key))
+          return true;
+        return Reflect.has(target, key);
+      },
+      ownKeys: () => {
+        return [...this.#map.keys()];
+      },
+      getOwnPropertyDescriptor: (target, key) => {
+        if (typeof key === "string" && this.#map.has(key)) {
+          return {
+            value: this.#map.get(key),
+            writable: true,
+            enumerable: true,
+            configurable: true
+          };
+        }
+        return Reflect.getOwnPropertyDescriptor(target, key);
       }
     })
   }
@@ -35,13 +63,24 @@ export class FakeStorage {
     }, 100);
   }
 
+  get length() {
+    return this.#map.size;
+  }
+
+  key(index) {
+    let keys = [...this.#map.keys()];
+    let value = keys[Number(index)];
+    return value === undefined ? null : value;
+  }
+
   clear() {
     this.#map.clear();
     this.#sync();
   }
 
   getItem(key) {
-    return this.#map.get(key+"") || null;
+    let name = key + "";
+    return this.#map.has(name) ? this.#map.get(name) : null;
   }
 
   setItem(key, value) {
