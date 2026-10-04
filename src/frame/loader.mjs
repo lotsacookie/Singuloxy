@@ -3,22 +3,25 @@ import * as rewrite from "./rewrite/index.mjs";
 import * as network from "./network.mjs";
 import * as parser from "./parser.mjs";
 
-import { update_ctx, run_script, run_script_safe, ctx, convert_url } from "./context.mjs";
+import { update_ctx, run_script, run_script_safe, ctx, convert_url, get_cookie_jar } from "./context.mjs";
 import { pending_scripts } from "./rewrite/script.mjs";
+import { pending_modules } from "./rewrite/module.mjs";
 
 export const navigate = rpc.create_rpc_wrapper(rpc.host, "navigate");
 export const local_storage = rpc.create_rpc_wrapper(rpc.host, "local_storage");
 export const cookies = rpc.create_rpc_wrapper(rpc.host, "cookies");
 
 export const runtime_src = self.document?.currentScript?.innerHTML;
-export let url; //the proxied page url
-export let frame_id; //the current frame id
-export let frame_html; //the html for the frame runtime
-export let version; //the sandstone version
+export let url;
+export let frame_id;
+export let frame_html;
+export let version;
 export let is_loaded = false;
 export let is_iframe = false;
 export let site_settings = {};
 export let default_settings = {};
+
+const MODULE_TIMEOUT_MS = 15000;
 
 function eval_script(script_element, script_text) {
   ctx.document.currentScript = script_element;
@@ -52,6 +55,36 @@ function evaluate_scripts() {
 
   for (let [script_element, script_text] of deferred) {
     eval_script(script_element, script_text);
+  }
+}
+
+function eval_module(script_element, blob_url) {
+  return new Promise((resolve) => {
+    let script = document.createElement("script");
+    script.__rewritten__ = true;
+    script.type = "module";
+    let done = false;
+    let finish = (event_name) => {
+      if (done) return;
+      done = true;
+      script.remove();
+      script_element.dispatchEvent(new Event(event_name));
+      resolve();
+    };
+    script.addEventListener("load", () => finish("load"));
+    script.addEventListener("error", () => finish("error"));
+    setTimeout(() => finish("error"), MODULE_TIMEOUT_MS);
+    script.src = blob_url;
+    document.body.append(script);
+  });
+}
+
+async function evaluate_modules() {
+  pending_modules.sort((a, b) => a[0] - b[0]);
+  let modules = [...pending_modules];
+  pending_modules.length = 0;
+  for (let [order, script_element, blob_url] of modules) {
+    await eval_module(script_element, blob_url);
   }
 }
 
@@ -91,7 +124,6 @@ async function load_html(options) {
     return;
   }
 
-  //load local storage
   if (options.local_storage) {
     for (let [key, value] of options.local_storage) {
       ctx.localStorage.setItem(key, value);
@@ -105,10 +137,8 @@ async function load_html(options) {
   let parser = new DOMParser();
   let html = parser.parseFromString(options.html, "text/html");  
   
-  //rewrite all html elements
   await rewrite.element(html.documentElement);
 
-  //add handler for navigation
   document.addEventListener("click", (event) => {
     if (event.defaultPrevented) return;
     let element = event.target;
@@ -137,7 +167,6 @@ async function load_html(options) {
     }
   });
 
-  //parse elements with ids and add them to the scope
   let id_elements = html.querySelectorAll("*[id]");
   let ctx_proto = Object.getPrototypeOf(ctx);
   for (let i = 0; i < id_elements.length; i++) {
@@ -146,14 +175,13 @@ async function load_html(options) {
     ctx[element.id] = element;
   }
 
-  //apply the rewritten html
   console.log("done downloading page");
   document.documentElement.replaceWith(html.documentElement);
   if (site_settings.allow_js) {
     evaluate_scripts();
+    await evaluate_modules();
   }
 
-  //trigger load events
   is_loaded = true;
   ctx.document.dispatchEvent(new Event("DOMContentLoaded"));
   ctx.document.dispatchEvent(new Event("readystatechange"));
