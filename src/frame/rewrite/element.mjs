@@ -46,8 +46,18 @@ function rewrite_element_single(element) {
 
     element.setAttribute("__" + attribute, handler_script);
     element.removeAttribute(attribute);
-    element.addEventListener(event_name, () => {
-      run_script(handler_script, element);
+
+    let handler_fn = null;
+    element.addEventListener(event_name, (event) => {
+      try {
+        if (!handler_fn)
+          handler_fn = run_script(`(function(event){${handler_script}\n})`);
+        if (handler_fn.call(element, event) === false)
+          event.preventDefault();
+      }
+      catch (e) {
+        console.error("sandstone: inline handler failed", attribute, e);
+      }
     });
   }
 
