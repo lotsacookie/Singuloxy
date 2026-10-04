@@ -8,7 +8,6 @@ export function is_valid_url(url) {
   }
 }
 
-//similar to promise.all, but it returns undefined if there is an error
 export async function run_parallel(promises) {
   let results = Array(promises.length);
   for (let [i, promise] of promises.entries()) {
@@ -31,10 +30,7 @@ export function format_error(error) {
   return error_msg;
 }
 
-//convert various data types to a uint8array (blobs excluded)
-//taken from libcurl.js source
 export function data_to_array(data) {
-  //data already in correct type
   if (data instanceof Uint8Array) {
     return data;  
   }
@@ -47,9 +43,8 @@ export function data_to_array(data) {
     return new Uint8Array(data);
   }
 
-  //dataview objects or any other typedarray
   else if (ArrayBuffer.isView(data)) {
-    return new Uint8Array(data.buffer);
+    return new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
   }
 
   throw new TypeError("invalid data type to be sent");
