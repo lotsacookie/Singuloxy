@@ -1,10 +1,7 @@
-import * as util from "../util.mjs";
 import { ctx_vars, unreadable_vars } from "./context.mjs";
 
 import * as meriyah from "meriyah";
 import * as astray from 'astray';
-
-let total_time = 0;
 
 class ASTVisitor {
   constructor(ast) {
@@ -17,6 +14,7 @@ class ASTVisitor {
     this.ThisExpression = this.ThisExpression.bind(this);
     this.Identifier = this.Identifier.bind(this);
     this.BlockStatement = this.BlockStatement.bind(this);
+    this.ImportExpression = this.ImportExpression.bind(this);
   }
 
   ThisExpression(node) {
@@ -47,7 +45,6 @@ class ASTVisitor {
     if (!ctx_vars.includes(node.name)) 
       return;
 
-    //this behavior isn't really correct
     let simple = false;
     if (parent.type === "AssignmentExpression" && parent.left === node) {
       if (node.name !== "location")
@@ -55,6 +52,10 @@ class ASTVisitor {
       simple = true;
     }
     this.rewrites.push({type: "global", pos: node.start, name: node.name, simple: simple});
+  }
+
+  ImportExpression(node) {
+    this.rewrites.push({type: "dynamic_import", pos: node.start});
   }
 
   BlockStatement(node) {
@@ -83,6 +84,9 @@ function gen_rewrite_code(rewrite) {
       replacement  = `(__get_var__(${rewrite.name}, "${rewrite.name}"))`;
     return [replacement, rewrite.pos + rewrite.name.length];
   }
+  else if (rewrite.type === "dynamic_import") {
+    return ["__dynamic_import__", rewrite.pos + 6];
+  }
   else if (rewrite.type === "delete") {
     let length = rewrite.end - rewrite.pos;
     return ["", rewrite.pos + length];
@@ -90,39 +94,28 @@ function gen_rewrite_code(rewrite) {
   throw new Error("invalid rewrite type");
 }
 
-export function rewrite_js(js) {
-  let start = performance.now();
+export function rewrite_js(js, is_module = false) {
   let ast
   try {
-    ast = meriyah.parse(js, {ranges: true, webcompat: true});
+    ast = meriyah.parse(js, {ranges: true, webcompat: true, module: is_module});
   }
   catch (e) {
     console.error("parse error", e);
     return js;
   }
-  let patch_start = performance.now();
   let ast_visitor = new ASTVisitor(ast);
   astray.walk(ast, ast_visitor);
   ast_visitor.rewrites.sort((a, b) => a.pos - b.pos);
 
   let rewritten_js = "";
-  if (ast_visitor.rewrites) {
-    let prev_offset = 0;
-    for (let rewrite of ast_visitor.rewrites) {
-      rewritten_js += js.substring(prev_offset, rewrite.pos);
-      let [replacement, offset] = gen_rewrite_code(rewrite);
-      rewritten_js += replacement;
-      prev_offset = offset;
-    }
-    rewritten_js += js.substring(prev_offset);
+  let prev_offset = 0;
+  for (let rewrite of ast_visitor.rewrites) {
+    rewritten_js += js.substring(prev_offset, rewrite.pos);
+    let [replacement, offset] = gen_rewrite_code(rewrite);
+    rewritten_js += replacement;
+    prev_offset = offset;
   }
-
-  let end = performance.now();
-  total_time += end - start;
-  let parse_time_rounded = util.round_float(patch_start - start, 2);
-  let patch_time_rounded = util.round_float(end - patch_start, 2);
-  let total_rounded = util.round_float(total_time, 2)
-  console.log(`parse took ${parse_time_rounded} ms, rewrite took ${patch_time_rounded} ms, total is ${total_rounded} ms (js size: ${Math.round(js.length/1024)} kb)`);
+  rewritten_js += js.substring(prev_offset);
   
   return rewritten_js || js;
 }
