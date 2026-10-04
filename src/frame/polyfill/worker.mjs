@@ -6,9 +6,7 @@ import { wrap_obj, run_script_safe, convert_url } from "../context.mjs";
 
 export function fakeImportScripts(...paths) {
   let script_urls = paths.map((path) => convert_url(path, loader.url));
-  console.log("DEBUG importScripts", network.requests_allowed, script_urls)
 
-  //requests are allowed, we are running as the real worker  
   if (network.requests_allowed) {
     for (let url of script_urls) {
       if (typeof network.resource_cache[url] === "string") {
@@ -18,15 +16,13 @@ export function fakeImportScripts(...paths) {
         throw Error("Script network request failed");
       }
       else {
-        //cache miss - try to load the script async anyways
-        console.warn("WARN importScripts cache miss for", url);
+        console.warn("sandstone: importScripts cache miss for", url);
         network.fetch(url).then(r => r.text()).then((js) => {
           run_script_safe(js);
-        })
+        }).catch((e) => console.error("sandstone: importScripts fetch failed", url, e));
       }
     }
   }
-  //otherwise just log the url that was fetched
   else {
     self.postMessage({
       frame_id: loader.frame_id,
@@ -39,7 +35,6 @@ export class FakeWorker extends EventTarget {
   #url; #options; #worker; #msg_queue; #terminated;
 
   constructor(url, options) {
-    console.log("DEBUG new Worker", url, options);
     super();
     this.#url = url;
     this.#options = options;
@@ -51,7 +46,17 @@ export class FakeWorker extends EventTarget {
     this.onmessage = () => {};
     this.onmessageerror = () => {};
 
-    this.#load_worker();
+    if (options && options.type === "module") {
+      console.warn("sandstone: module workers are not supported, running as a classic worker");
+    }
+
+    this.#load_worker().catch((e) => {
+      console.error("sandstone: worker failed to start", url, e);
+      try {
+        this.onerror(new ErrorEvent("error", {message: String(e)}));
+      }
+      catch {}
+    });
   }
 
   async #load_worker() {
@@ -71,7 +76,7 @@ export class FakeWorker extends EventTarget {
     let temp_blob_url = URL.createObjectURL(temp_blob);
 
     if (this.#terminated) return;
-    let temp_worker = new Worker(temp_blob_url, this.#options);
+    let temp_worker = new Worker(temp_blob_url, {...this.#options, type: "classic"});
     this.#worker_attach(temp_worker);
     let recorded_urls = new Set();
     let terminate_worker;
@@ -84,14 +89,12 @@ export class FakeWorker extends EventTarget {
       terminate_worker();
     }
 
-    //wait for the temp worker to record the imported URLs, then kill it
     await new Promise((resolve) => {
       terminate_worker = resolve;
       setTimeout(resolve, 500);
     });
     temp_worker.terminate();
 
-    //fetch all of the imported URLs
     let promises = [];
     let script_data = {};
     for (let url of recorded_urls) {
@@ -104,7 +107,6 @@ export class FakeWorker extends EventTarget {
     }
     await util.run_parallel(promises);
 
-    console.log("DEBUG recorded urls", recorded_urls);
     let cache_puts = [];
     for (let url of recorded_urls) {
       let safe_url = JSON.stringify(url);
@@ -126,7 +128,8 @@ export class FakeWorker extends EventTarget {
     let real_blob = new Blob([real_script], {type: "text/javascript"});
     let real_blob_url = network.create_blob_url(real_blob, this.#url);
 
-    this.#worker = new Worker(real_blob_url, this.#options);
+    if (this.#terminated) return;
+    this.#worker = new Worker(real_blob_url, {...this.#options, type: "classic"});
     this.#worker_attach(this.#worker);
     for (let event of ["error", "message", "messageerror"]) {
       this.#setup_listener(event);
@@ -134,8 +137,8 @@ export class FakeWorker extends EventTarget {
     for (let [message, transfer] of this.#msg_queue) {
       this.#worker.postMessage(message, transfer);
     }
+    this.#msg_queue = [];
 
-    //forward the attach message to the parent frame
     this.#worker.addEventListener("message", (event) => {
       rpc.message_listener(event);
       event.stopImmediatePropagation();
@@ -143,7 +146,7 @@ export class FakeWorker extends EventTarget {
 
     window.addEventListener("beforeunload", () => {
       this.terminate();
-    }, null, true);
+    }, true);
   }
 
   #worker_attach(worker) {
