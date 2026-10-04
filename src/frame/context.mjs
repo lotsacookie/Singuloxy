@@ -197,6 +197,10 @@ export function update_ctx() {
   globalThis.__get_var__ = ctx.__get_var__;
 }
 
+export function get_cookie_jar() {
+  return internal.cookie_jar;
+}
+
 export function convert_url(url, base) {
   let url_obj = new URL(url, base);
   return url_obj.href;
