@@ -1,7 +1,7 @@
 import * as rpc from "../rpc.mjs";
 import * as loader from "./loader.mjs";
 import * as util from "../util.mjs";
-import { ctx } from "./context.mjs";
+import { ctx, get_cookie_jar } from "./context.mjs";
 
 export const rpc_fetch = rpc.create_rpc_wrapper(rpc.host, "fetch");
 export const rpc_ws_new = rpc.create_rpc_wrapper(rpc.host, "ws_new");
@@ -18,7 +18,51 @@ export function enable_network(allowed=true) {
 }
 
 export function cache_put(url, data) {
-  resource_cache[url] = data; //put a blob into the cache
+  resource_cache[url] = data;
+}
+
+function page_origin() {
+  try {
+    return ctx.location?.origin || new URL(loader.url).origin;
+  }
+  catch {
+    return null;
+  }
+}
+
+function is_page_origin(url_obj) {
+  let origin = page_origin();
+  if (!origin) return false;
+  let compare = new URL(url_obj.href);
+  if (compare.protocol === "ws:") compare.protocol = "http:";
+  if (compare.protocol === "wss:") compare.protocol = "https:";
+  return compare.origin === origin;
+}
+
+function cookie_header_for(url_obj) {
+  if (!is_page_origin(url_obj)) return "";
+  let jar = get_cookie_jar();
+  if (!jar) return "";
+  return jar.get_header();
+}
+
+function add_cookie_to_options(url_obj, options) {
+  let cookie = cookie_header_for(url_obj);
+  if (!cookie) return options;
+  let headers = new Headers((options && options.headers) || {});
+  if (headers.has("cookie")) return options;
+  headers.set("cookie", cookie);
+  return {...options, headers: Object.fromEntries(headers)};
+}
+
+function store_response_cookies(url_obj, set_cookies) {
+  if (!set_cookies.length) return;
+  if (!is_page_origin(url_obj)) return;
+  let jar = get_cookie_jar();
+  if (!jar) return;
+  for (let cookie of set_cookies) {
+    jar.set(cookie, true);
+  }
 }
 
 export async function fetch(url, options) {
@@ -33,7 +77,8 @@ export async function fetch(url, options) {
     throw TypeError("Invalid URL");
   }
 
-  let fetch_data = await rpc_fetch(url.href, options);
+  let request_options = add_cookie_to_options(url, options);
+  let fetch_data = await rpc_fetch(url.href, request_options);
   let response = new Response(fetch_data.body);
   for (let key in fetch_data.items) {
     Object.defineProperty(response, key, {
@@ -42,12 +87,15 @@ export async function fetch(url, options) {
   }
 
   let headers = new Headers();
+  let set_cookies = [];
   for (let [key, value] of fetch_data.headers) {
-    headers.append(key, value)
+    headers.append(key, value);
+    if (key.toLowerCase() === "set-cookie") set_cookies.push(value);
   }
   Object.defineProperty(response, "headers", {
     value: headers
   });
+  store_response_cookies(url, set_cookies);
 
   return response;
 };
@@ -60,6 +108,11 @@ export function create_blob_url(blob, target_url = null) {
 }
 
 export class WebSocket extends EventTarget {
+  static CONNECTING = 0;
+  static OPEN = 1;
+  static CLOSING = 2;
+  static CLOSED = 3;
+
   #ws_id;
 
   constructor(url, protocols=[]) {
@@ -68,11 +121,12 @@ export class WebSocket extends EventTarget {
     let url_obj = new URL(url, ctx.location.href);
     url_obj.protocol = url_obj.protocol.replace("http", "ws");
     this.url = url_obj.href;
-    this.protocols = protocols;
+    this.protocols = Array.isArray(protocols) ? protocols : [protocols];
+    this.protocol = "";
+    this.extensions = "";
     this.binaryType = "blob";
     this.bufferedAmount = 0;
 
-    //legacy event handlers
     this.onopen = () => {};
     this.onerror = () => {};
     this.onmessage = () => {};
@@ -89,12 +143,24 @@ export class WebSocket extends EventTarget {
   }
 
   async #connect() {
-    this.#ws_id = await rpc_ws_new(loader.frame_id, this.url, this.protocols, {
-      headers: {
-        "Origin": ctx.location.origin,
-        "User-Agent": navigator.userAgent,
-      }
-    });
+    let headers = {
+      "Origin": ctx.location.origin,
+      "User-Agent": navigator.userAgent,
+    };
+    let cookie = cookie_header_for(new URL(this.url));
+    if (cookie) headers["Cookie"] = cookie;
+
+    try {
+      this.#ws_id = await rpc_ws_new(loader.frame_id, this.url, this.protocols, {
+        headers: headers
+      });
+    }
+    catch (e) {
+      console.error("sandstone: websocket connect failed", e);
+      this.#forward_event("error", null);
+      this.#forward_event("close", null);
+      return;
+    }
     this.#event_loop();
   }
 
@@ -144,7 +210,7 @@ export class WebSocket extends EventTarget {
 
   send(data) {
     if (this.readyState === this.CONNECTING) {
-      throw new DOMException("Websocket not ready yet.");
+      throw new DOMException("Websocket not ready yet.", "InvalidStateError");
     }
     if (this.readyState === this.CLOSED) {
       return;
