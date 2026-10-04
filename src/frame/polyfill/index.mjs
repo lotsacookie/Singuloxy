@@ -6,4 +6,5 @@ export { FakeCookieJar } from "./cookie.mjs";
 export { fakeImportScripts, FakeWorker } from "./worker.mjs";
 
 export { fetch } from "./fetch.mjs";
+export { FakeRequest } from "./request.mjs";
 export { FakeXMLHttpRequest } from "./xhr.mjs";
