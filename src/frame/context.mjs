@@ -17,7 +17,8 @@ const internal = {
   eval: null,
   history: null,
   localStorage: null,
-  sessionStorage: null
+  sessionStorage: null,
+  cookie_jar: null
 };
 
 function create_func_proxy(target, func) {
@@ -190,6 +191,7 @@ export function update_ctx() {
   internal.history = new polyfill.FakeHistory();
   internal.localStorage = new polyfill.FakeStorage("local");
   internal.sessionStorage = new polyfill.FakeStorage("session");
+  internal.cookie_jar = new polyfill.FakeCookieJar();
   delete globalThis.caches;
 
   globalThis.__ctx__ = ctx.__proxy__;
@@ -216,7 +218,6 @@ export function run_script_safe(js) {
 }
 
 export function run_script(js) {
-  //indirect eval preserves global variables
   let rewritten_js = parser.rewrite_js(js);
   return eval?.(rewritten_js);
 }
