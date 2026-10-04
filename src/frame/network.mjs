@@ -4,6 +4,8 @@ import * as util from "../util.mjs";
 import { ctx, get_cookie_jar } from "./context.mjs";
 
 export const rpc_fetch = rpc.create_rpc_wrapper(rpc.host, "fetch");
+export const rpc_fetch_read = rpc.create_rpc_wrapper(rpc.host, "fetch_read");
+export const rpc_fetch_cancel = rpc.create_rpc_wrapper(rpc.host, "fetch_cancel");
 export const rpc_ws_new = rpc.create_rpc_wrapper(rpc.host, "ws_new");
 export const rpc_ws_event = rpc.create_rpc_wrapper(rpc.host, "ws_event");
 export const rpc_ws_send = rpc.create_rpc_wrapper(rpc.host, "ws_send");
@@ -53,6 +55,30 @@ function store_response_cookies(url_obj, fetch_data) {
   }
 }
 
+function create_body_stream(stream_id, href) {
+  return new ReadableStream({
+    async pull(controller) {
+      try {
+        let chunk = await rpc_fetch_read(stream_id);
+        if (chunk === null || chunk === undefined) {
+          controller.close();
+        }
+        else {
+          controller.enqueue(chunk);
+        }
+      }
+      catch (e) {
+        let reason = e?.message ?? String(e);
+        console.error("sandstone: download failed mid-transfer:", href, reason);
+        controller.error(new TypeError("Failed to fetch " + href + " (" + reason + ")"));
+      }
+    },
+    cancel() {
+      rpc_fetch_cancel(stream_id).catch(() => {});
+    }
+  }, new CountQueuingStrategy({highWaterMark: 2}));
+}
+
 export async function fetch(url, options) {
   if (!requests_allowed) throw "Network request blocked";
 
@@ -74,7 +100,16 @@ export async function fetch(url, options) {
     console.error("sandstone: proxied fetch failed:", url.href, reason);
     throw new TypeError("Failed to fetch " + url.href + " (" + reason + ")");
   }
-  let response = new Response(fetch_data.body);
+
+  let body = null;
+  if (fetch_data.stream_id !== null && fetch_data.stream_id !== undefined) {
+    body = create_body_stream(fetch_data.stream_id, url.href);
+  }
+  let response_init = {};
+  if (fetch_data.mime_type) {
+    response_init.headers = {"Content-Type": fetch_data.mime_type};
+  }
+  let response = new Response(body, response_init);
   for (let key in fetch_data.items) {
     Object.defineProperty(response, key, {
       value: fetch_data.items[key]
