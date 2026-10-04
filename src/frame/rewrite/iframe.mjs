@@ -51,8 +51,11 @@ export function rewrite_iframe(iframe_element) {
     //load persisted local storage if needed
     let iframe_origin = new URL(iframe_url).origin;
     let local_storage;
-    if (iframe_origin === ctx.location.origin)
+    let cookies;
+    if (iframe_origin === ctx.location.origin) {
       local_storage = ctx.localStorage._get_entries();
+      cookies = get_cookie_jar()._get_entries();
+    }
 
     let frame_id = Math.random() + "";
     try {
@@ -62,6 +65,7 @@ export function rewrite_iframe(iframe_element) {
         frame_id: frame_id,
         error: error,
         local_storage: local_storage,
+        cookies: cookies,
         settings: {},
         default_settings: loader.default_settings,
         version: loader.version,
