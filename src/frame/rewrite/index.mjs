@@ -10,4 +10,8 @@ export { rewrite_iframe as iframe } from "./iframe.mjs";
 export { rewrite_stylesheet as stylesheet } from "./stylesheet.mjs";
 export { rewrite_style as style } from "./style.mjs";
 export { rewrite_script as script } from "./script.mjs";
-export { rewrite_module_script as module_script, dynamic_import as module_dynamic_import } from "./module.mjs";
+export {
+  rewrite_module_script as module_script,
+  rewrite_import_map as import_map,
+  dynamic_import as module_dynamic_import
+} from "./module.mjs";
