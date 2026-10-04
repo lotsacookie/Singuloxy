@@ -2,24 +2,29 @@ import * as network from "../network.mjs";
 import { ctx } from "../context.mjs";
 
 export class FakeXMLHttpRequest extends EventTarget {
+  static UNSENT = 0;
+  static OPENED = 1;
+  static HEADERS_RECEIVED = 2;
+  static LOADING = 3;
+  static DONE = 4;
+
   UNSENT = 0;
   OPENED = 1;
   HEADERS_RECEIVED = 2;
   LOADING = 3;
   DONE = 4;
 
-  #ready_state; //internal readystate value
-  #response; //a response object 
-  #response_data; //an arraybuffer containing the response data
-  #mime_type; //internal mime type value
-  #upload; //internal XMLHttpRequestUpload object
-  #req_url; //internal store for request url
-  #req_options; //internal request options dict
+  #ready_state;
+  #response;
+  #response_data;
+  #mime_type;
+  #upload;
+  #req_url;
+  #req_options;
   #aborted;
 
   constructor() {
     super();
-    console.log("DEBUG XHR.constructor", this);
     this.#init_internal();
     this.#mime_type = null;
 
@@ -50,7 +55,8 @@ export class FakeXMLHttpRequest extends EventTarget {
   #emit_event(event, target) {
     if (!target) {
       this.#emit_event(event, this);
-      this.#emit_event(event, this.#upload);
+      if (event.type !== "readystatechange")
+        this.#emit_event(new ProgressEvent(event.type), this.#upload);
       return;
     }
     target.dispatchEvent(event);
@@ -63,13 +69,11 @@ export class FakeXMLHttpRequest extends EventTarget {
     }
   } 
 
-  //note: we can't really abort requests through the rpc interface
   abort() {
     this.#aborted = true;
     this.readyState = this.UNSENT;
     this.#response = null;
-    this.#emit_event(new Event("abort"));
-    this.#emit_event(new Event("abort"), this.#upload);
+    this.#emit_event(new ProgressEvent("abort"));
   }
 
   getAllResponseHeaders() {
@@ -82,21 +86,21 @@ export class FakeXMLHttpRequest extends EventTarget {
   }
 
   getResponseHeader(header_name) {
-    if (!this.#response) return "";
+    if (!this.#response) return null;
     return this.#response.headers.get(header_name);
   }
 
   open(method, url, async, user, password) {
-    console.log("DEBUG XHR.open", this, method, url, async, user, password);
-
-    if (async === false) //erroring here is actually permitted by spec
+    if (async === false)
       throw new DOMException("InvalidAccessError") 
     
     this.#init_internal();
     this.readyState = this.OPENED;
     this.#req_url = new URL(url, ctx.location.href);
-    this.#req_url.username = user || "";
-    this.#req_url.password = password || "";
+    if (user) {
+      this.#req_url.username = user;
+      this.#req_url.password = password || "";
+    }
     this.#req_options.headers = {};
     this.#req_options.method = method.toUpperCase();
   }
@@ -105,36 +109,65 @@ export class FakeXMLHttpRequest extends EventTarget {
     this.#mime_type = mime_type;
   }
 
+  async #encode_body(options, body) {
+    if (options.method === "GET" || options.method === "HEAD" || body === undefined || body === null) {
+      delete options.body;
+      return;
+    }
+    let request = new Request("http://127.0.0.1/", {method: "POST", body: body});
+    let buffer = await request.arrayBuffer();
+    let content_type = request.headers.get("content-type");
+    let has_content_type = Object.keys(options.headers).some((name) => name.toLowerCase() === "content-type");
+    if (content_type && !has_content_type) {
+      options.headers["Content-Type"] = content_type;
+    }
+    options.body = buffer.byteLength ? buffer : undefined;
+  }
+
   send(body) {
-    console.log("DEBUG XHR.send", this, body);
-    if (this.#req_options.method === "GET")
-      body = undefined;
+    let options = {...this.#req_options, headers: {...this.#req_options.headers}};
+    let timed_out = false;
+    let timer = null;
+
+    this.#emit_event(new ProgressEvent("loadstart"));
 
     if (this.timeout) {
-      setTimeout(() => {
-        if (this.readyState !== this.DONE)
-          this.abort();
+      timer = setTimeout(() => {
+        if (this.readyState === this.DONE || this.#aborted) return;
+        timed_out = true;
+        this.#aborted = true;
+        this.readyState = this.DONE;
+        this.#emit_event(new ProgressEvent("timeout"));
+        this.#emit_event(new ProgressEvent("loadend"));
       }, this.timeout);
     }
-    this.#req_options.body = body || undefined;
 
     (async () => {
       try {
-        this.#response = await network.fetch(this.#req_url, this.#req_options);
+        await this.#encode_body(options, body);
+        this.#response = await network.fetch(this.#req_url, options);
+        if (this.#aborted) return;
         this.readyState = this.HEADERS_RECEIVED;
         this.readyState = this.LOADING;
   
-        if (this.#aborted) return;
-        this.#emit_event(new ProgressEvent("loadstart"));
         this.#response_data = await this.#response.arrayBuffer();
-        this.#emit_event(new ProgressEvent("progress"));
+        if (this.#aborted) return;
+        let size = this.#response_data.byteLength;
+        this.#emit_event(new ProgressEvent("progress", {lengthComputable: true, loaded: size, total: size}));
         this.readyState = this.DONE;
-        this.#emit_event(new ProgressEvent("load"));
+        this.#emit_event(new ProgressEvent("load", {lengthComputable: true, loaded: size, total: size}));
       }
       catch (e) {
+        if (this.#aborted) return;
+        console.error("sandstone: xhr failed", this.#req_url?.href, e);
+        this.readyState = this.DONE;
         this.#emit_event(new ProgressEvent("error"));
       }
-      this.#emit_event(new ProgressEvent("loadend"));  
+      finally {
+        if (timer) clearTimeout(timer);
+      }
+      if (!timed_out && !this.#aborted)
+        this.#emit_event(new ProgressEvent("loadend"));  
     })();
   }
 
@@ -156,11 +189,22 @@ export class FakeXMLHttpRequest extends EventTarget {
 
   get response() {
     if (this.#response_data === null) 
-      return undefined;
+      return this.responseType === "" || this.responseType === "text" ? "" : null;
     if (this.responseType === "blob") 
-      return new Blob([this.#response_data]);
+      return new Blob([this.#response_data], {type: this.#response.headers.get("content-type") || ""});
     else if (this.responseType === "arraybuffer")
       return this.#response_data;
+    else if (this.responseType === "json") {
+      try {
+        return JSON.parse(this.responseText);
+      }
+      catch {
+        return null;
+      }
+    }
+    else if (this.responseType === "document") {
+      return new DOMParser().parseFromString(this.responseText, this.#mime_type || "text/html");
+    }
     else
       return this.responseText;
   }
@@ -198,4 +242,4 @@ export class FakeXMLHttpRequest extends EventTarget {
   get upload() {
     return this.#upload;
   }
-}
+  }
