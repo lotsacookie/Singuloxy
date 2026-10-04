@@ -6,13 +6,62 @@ import * as parser from "../parser.mjs";
 import { ctx, convert_url } from "../context.mjs";
 
 const module_cache = new Map();
-const loading_stack = new Set();
+const import_map = { imports: {} };
 
-const STUB_MODULE_SRC = "/* sandstone: circular import stub, see console warning */\nexport default undefined;\n";
+const STUB_MODULE_SRC = "export default undefined;\n";
+
+export const pending_modules = [];
+let module_order = 0;
 
 function make_blob_url(js_text) {
   let blob = new Blob([js_text], { type: "text/javascript" });
   return URL.createObjectURL(blob);
+}
+
+function is_bare_specifier(specifier) {
+  if (specifier.startsWith("./") || specifier.startsWith("../") || specifier.startsWith("/")) return false;
+  if (/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(specifier)) return false;
+  return true;
+}
+
+function should_proxy(url) {
+  return /^https?:/i.test(url);
+}
+
+function resolve_specifier(specifier, base_url) {
+  let normalized = is_bare_specifier(specifier) ? specifier : convert_url(specifier, base_url);
+  let imports = import_map.imports;
+  if (Object.prototype.hasOwnProperty.call(imports, normalized)) {
+    return imports[normalized];
+  }
+  let best = null;
+  for (let key of Object.keys(imports)) {
+    if (!key.endsWith("/")) continue;
+    if (!normalized.startsWith(key)) continue;
+    if (best === null || key.length > best.length) best = key;
+  }
+  if (best !== null) {
+    return imports[best] + normalized.substring(best.length);
+  }
+  if (is_bare_specifier(specifier)) {
+    throw new TypeError("Failed to resolve module specifier \"" + specifier + "\"");
+  }
+  return normalized;
+}
+
+export function rewrite_import_map(script_element) {
+  try {
+    let parsed = JSON.parse(script_element.textContent);
+    let base = ctx.location.href;
+    for (let [key, value] of Object.entries(parsed.imports || {})) {
+      if (typeof value !== "string") continue;
+      let map_key = is_bare_specifier(key) ? key : convert_url(key, base);
+      import_map.imports[map_key] = convert_url(value, base);
+    }
+  }
+  catch (e) {
+    console.error("sandstone: invalid import map", e);
+  }
 }
 
 class ImportVisitor {
@@ -21,6 +70,7 @@ class ImportVisitor {
     this.ImportDeclaration = this.ImportDeclaration.bind(this);
     this.ExportNamedDeclaration = this.ExportNamedDeclaration.bind(this);
     this.ExportAllDeclaration = this.ExportAllDeclaration.bind(this);
+    this.ImportExpression = this.ImportExpression.bind(this);
     this.MemberExpression = this.MemberExpression.bind(this);
   }
 
@@ -37,6 +87,17 @@ class ImportVisitor {
   ImportDeclaration(node) { this.record_source(node); }
   ExportNamedDeclaration(node) { this.record_source(node); }
   ExportAllDeclaration(node) { this.record_source(node); }
+
+  ImportExpression(node) {
+    if (!node.source) return;
+    this.records.push({
+      type: "dynamic",
+      start: node.start,
+      end: node.end,
+      source_start: node.source.start,
+      source_end: node.source.end
+    });
+  }
 
   MemberExpression(node) {
     let obj = node.object;
@@ -67,6 +128,7 @@ function apply_splices(js, splices) {
   let out = "";
   let prev = 0;
   for (let splice of sorted) {
+    if (splice.start < prev) continue;
     out += js.substring(prev, splice.start);
     out += splice.replacement;
     prev = splice.end;
@@ -75,75 +137,91 @@ function apply_splices(js, splices) {
   return out;
 }
 
-async function resolve_and_rewrite(js, base_url) {
+async function resolve_and_rewrite(js, base_url, chain) {
   let records = find_module_imports(js);
-  let splices = [];
 
-  for (let record of records) {
+  let results = await Promise.all(records.map(async (record) => {
     if (record.type === "import_meta_url") {
-      splices.push({ start: record.start, end: record.end, replacement: JSON.stringify(base_url) });
-      continue;
+      return { start: record.start, end: record.end, replacement: JSON.stringify(base_url) };
     }
 
-    let absolute = convert_url(record.specifier, base_url);
+    if (record.type === "dynamic") {
+      let source_text = js.substring(record.source_start, record.source_end);
+      return {
+        start: record.start,
+        end: record.end,
+        replacement: "__dynamic_import__(" + source_text + ", " + JSON.stringify(base_url) + ")"
+      };
+    }
+
+    let absolute = resolve_specifier(record.specifier, base_url);
+    if (!should_proxy(absolute)) return null;
+
     let blob_url;
-    if (loading_stack.has(absolute)) {
+    if (chain.has(absolute)) {
       console.warn("sandstone: circular ES module import detected, using an empty stub for this edge:", absolute);
       blob_url = make_blob_url(STUB_MODULE_SRC);
     }
     else {
-      blob_url = await load_module(absolute, absolute);
+      blob_url = await load_module(absolute, absolute, null, chain);
     }
-    splices.push({ start: record.start, end: record.end, replacement: JSON.stringify(blob_url) });
-  }
+    return { start: record.start, end: record.end, replacement: JSON.stringify(blob_url) };
+  }));
 
+  let splices = results.filter((splice) => splice);
   let with_imports_rewritten = apply_splices(js, splices);
   return parser.rewrite_js(with_imports_rewritten, true);
 }
 
-export async function load_module(cache_key, base_url, source_text = null) {
+export async function load_module(cache_key, base_url, source_text = null, chain = new Set()) {
   if (module_cache.has(cache_key)) {
     return module_cache.get(cache_key);
   }
 
+  let next_chain = new Set(chain);
+  if (typeof cache_key === "string") next_chain.add(cache_key);
+
   let promise = (async () => {
-    loading_stack.add(cache_key);
-    try {
-      let js = source_text;
-      if (js === null) {
-        let response = await network.fetch(base_url);
-        js = await response.text();
+    let js = source_text;
+    if (js === null) {
+      let response = await network.fetch(base_url);
+      if (response.ok === false) {
+        throw new Error("failed to fetch module " + base_url + " (status " + response.status + ")");
       }
-      let rewritten = await resolve_and_rewrite(js, base_url);
-      return make_blob_url(rewritten);
+      js = await response.text();
     }
-    finally {
-      loading_stack.delete(cache_key);
-    }
+    let rewritten = await resolve_and_rewrite(js, base_url, next_chain);
+    return make_blob_url(rewritten);
   })();
 
   module_cache.set(cache_key, promise);
+  promise.catch(() => module_cache.delete(cache_key));
   return promise;
 }
 
-export async function dynamic_import(specifier) {
-  let absolute = convert_url(specifier, ctx.location.href);
-  let blob_url = loading_stack.has(absolute)
-    ? make_blob_url(STUB_MODULE_SRC)
-    : await load_module(absolute, absolute);
+export async function dynamic_import(specifier, base_url) {
+  let absolute = resolve_specifier(String(specifier), base_url || ctx.location.href);
+  if (!should_proxy(absolute)) {
+    return import(/* webpackIgnore: true */ absolute);
+  }
+  let blob_url = await load_module(absolute, absolute);
   return import(/* webpackIgnore: true */ blob_url);
 }
 
 export async function rewrite_module_script(script_element) {
   if (!loader.site_settings.allow_js) return;
 
+  let order = module_order++;
   let script_url = script_element.getAttribute("src");
-  let inline_text = script_element.innerHTML;
-  script_element.removeAttribute("src");
+  let inline_text = script_element.textContent;
 
   let is_inline = !script_url;
   let base_url = script_url ? convert_url(script_url, ctx.location.href) : ctx.location.href;
   let cache_key = is_inline ? Symbol("inline-module") : base_url;
+
+  if (script_url) script_element.setAttribute("__src", script_url);
+  script_element.removeAttribute("src");
+  script_element.setAttribute("type", "text/plain");
 
   let blob_url;
   try {
@@ -151,10 +229,9 @@ export async function rewrite_module_script(script_element) {
   }
   catch (e) {
     console.error("sandstone: failed to load module script", base_url, e);
+    script_element.dispatchEvent(new Event("error"));
     return;
   }
 
-  script_element.innerHTML = "";
-  script_element.type = "module";
-  script_element.src = blob_url;
-  }
+  pending_modules.push([order, script_element, blob_url]);
+}
