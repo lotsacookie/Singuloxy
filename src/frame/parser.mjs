@@ -3,6 +3,32 @@ import { ctx_vars, unreadable_vars } from "./context.mjs";
 import * as meriyah from "meriyah";
 import * as astray from 'astray';
 
+const script_parse_attempts = [
+  {webcompat: true},
+  {webcompat: true, next: true, globalReturn: true, specDeviation: true},
+  {webcompat: true, next: true, module: true}
+];
+
+const module_parse_attempts = [
+  {webcompat: true, next: true, module: true}
+];
+
+function parse_js(js, is_module) {
+  let attempts = is_module ? module_parse_attempts : script_parse_attempts;
+  let last_error;
+
+  for (let options of attempts) {
+    try {
+      return meriyah.parse(js, {ranges: true, ...options});
+    }
+    catch (e) {
+      last_error = e;
+    }
+  }
+
+  throw last_error;
+}
+
 class ASTVisitor {
   constructor(ast) {
     this.ast = ast;
@@ -110,12 +136,12 @@ function gen_rewrite_code(rewrite) {
 }
 
 export function rewrite_js(js, is_module = false) {
-  let ast
+  let ast;
   try {
-    ast = meriyah.parse(js, {ranges: true, webcompat: true, module: is_module});
+    ast = parse_js(js, is_module);
   }
   catch (e) {
-    console.error("sandstone: JS parse error, script left UNREWRITTEN (it will bypass the proxy)", e);
+    console.error("sandstone: JS parse error, script left UNREWRITTEN (it will bypass the proxy):", e?.message ?? e);
     return js;
   }
   let ast_visitor = new ASTVisitor(ast);
