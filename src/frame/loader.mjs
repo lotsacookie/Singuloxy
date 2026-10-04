@@ -8,6 +8,7 @@ import { pending_scripts } from "./rewrite/script.mjs";
 
 export const navigate = rpc.create_rpc_wrapper(rpc.host, "navigate");
 export const local_storage = rpc.create_rpc_wrapper(rpc.host, "local_storage");
+export const cookies = rpc.create_rpc_wrapper(rpc.host, "cookies");
 
 export const runtime_src = self.document?.currentScript?.innerHTML;
 export let url; //the proxied page url
@@ -80,6 +81,8 @@ async function load_html(options) {
   get_frame_html();
   update_ctx();
 
+  globalThis.__dynamic_import__ = rewrite.module_dynamic_import;
+
   if (options.error) {
     document.getElementById("loading_text").style.display = "none";
     document.getElementById("error_div").style.display = "initial";
@@ -93,6 +96,10 @@ async function load_html(options) {
     for (let [key, value] of options.local_storage) {
       ctx.localStorage.setItem(key, value);
     }
+  }
+
+  if (options.cookies) {
+    get_cookie_jar().load(options.cookies);
   }
 
   let parser = new DOMParser();
