@@ -36,12 +36,27 @@ class ASTVisitor {
       return;
     if (parent.type === "VariableDeclarator" && parent.id === node)
       return;
-    let ignored_parents = [
-      "Property", "FunctionDeclaration", "AssignmentPattern", 
-      "FunctionExpression", "ArrowFunctionExpression", "MethodDefinition"
-    ];
-    if (ignored_parents.includes(parent.type))
+
+    if (parent.type === "Property") {
+      if (parent.shorthand || (parent.key === node && !parent.computed))
+        return;
+      if (parent.path?.parent?.type !== "ObjectExpression")
+        return;
+    }
+    else if (parent.type === "ArrowFunctionExpression") {
+      if (parent.body !== node) return;
+    }
+    else if (parent.type === "AssignmentPattern") {
+      if (parent.right !== node) return;
+    }
+    else if (
+      parent.type === "FunctionDeclaration" ||
+      parent.type === "FunctionExpression" ||
+      parent.type === "MethodDefinition"
+    ) {
       return;
+    }
+
     if (!ctx_vars.includes(node.name)) 
       return;
 
@@ -100,7 +115,7 @@ export function rewrite_js(js, is_module = false) {
     ast = meriyah.parse(js, {ranges: true, webcompat: true, module: is_module});
   }
   catch (e) {
-    console.error("parse error", e);
+    console.error("sandstone: JS parse error, script left UNREWRITTEN (it will bypass the proxy)", e);
     return js;
   }
   let ast_visitor = new ASTVisitor(ast);
