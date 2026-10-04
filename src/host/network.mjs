@@ -5,6 +5,11 @@ import { libcurl } from "libcurl.js/bundled";
 export const ws_connections = {};
 export let session = null;
 
+let session_ready_resolve;
+const session_ready = new Promise((resolve) => {
+  session_ready_resolve = resolve;
+});
+
 export function set_websocket(url) {
   libcurl.set_websocket(url);
 }
@@ -15,9 +20,18 @@ function get_ws(frame_id, ws_id) {
   return frame_websockets[ws_id];
 }
 
-//handle fetch api requests
 rpc_handlers["fetch"] = async function(url, options) {
-  var response = await session.fetch(url, options);
+  if (!session) await session_ready;
+
+  var response;
+  try {
+    response = await session.fetch(url, options);
+  }
+  catch (e) {
+    console.error("sandstone host: libcurl fetch failed:", url, e);
+    throw e;
+  }
+
   var keys = ["ok", "redirected", "status", "statusText", "type", "url", "raw_headers"];
   var payload = {
     body: await response.blob(),
@@ -38,7 +52,6 @@ rpc_handlers["fetch"] = async function(url, options) {
   return payload
 }
 
-//handle websocket creation 
 rpc_handlers["ws_new"] = function (frame_id, url, protocols, options) {
   let ws_id = Math.random() + "";
   let ws = new libcurl.CurlWebSocket(url, protocols, options);
@@ -52,7 +65,6 @@ rpc_handlers["ws_new"] = function (frame_id, url, protocols, options) {
   };
   let ws_info = ws_connections[frame_id][ws_id];
   
-  //set up event listeners to forward to the frame
   for (let event_name of ["open", "message", "close", "error"]) {
     ws["on" + event_name] = (data) => {
       ws_info.events.push([event_name, data]);
@@ -60,7 +72,6 @@ rpc_handlers["ws_new"] = function (frame_id, url, protocols, options) {
     }
   }
 
-  //make sure ws is closed automatically
   let close_callback = ws.onclose;
   ws.onclose = (reason) => {
     close_callback(reason);
@@ -70,7 +81,6 @@ rpc_handlers["ws_new"] = function (frame_id, url, protocols, options) {
   return ws_id;
 }
 
-//the frame will call this repeatedly to poll for new events
 rpc_handlers["ws_event"] = function (frame_id, ws_id) {
   let ws_info = get_ws(frame_id, ws_id);
   if (!ws_info) return null;
@@ -102,7 +112,6 @@ rpc_handlers["ws_close"] = function (frame_id, ws_id) {
   ws_info.ws.close();
 }
 
-//when navigating to a new page we need to close unused connections
 export function clean_ws_connections(id_to_clean) {
   let frame_ids = Object.keys(iframes);
   
@@ -120,5 +129,6 @@ export function clean_ws_connections(id_to_clean) {
 
 libcurl.events.addEventListener("libcurl_load", () => {
   console.log(`libcurl.js v${libcurl.version.lib} loaded`);
-  session = new libcurl.HTTPSession({enable_cookies: true})
+  session = new libcurl.HTTPSession({enable_cookies: true});
+  session_ready_resolve();
 });
