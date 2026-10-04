@@ -4,7 +4,6 @@ export const rpc_requests = {};
 export let host = null;
 export let on_attach = () => {};
 
-//a flexible wrapper for message ports
 export class RPCTarget {
   constructor(target=null) {
     this.target = null;
@@ -78,8 +77,7 @@ function handle_procedure_reply(msg) {
 export async function message_listener(event, target) {
   let msg = event.data;
   let source = event.source || event.currentTarget;
-  if (typeof msg.type === "undefined") return;
-  console.log(`RPC ${role} got`, msg);
+  if (!msg || typeof msg.type === "undefined") return;
 
   if (msg.type === "procedure") {
     let output = await handle_procedure_call(msg);
@@ -120,7 +118,6 @@ export async function call_procedure(target, procedure, args) {
       if (reply.success) resolve(reply.value);
       else reject(reply.value);
     }
-    console.log(`RPC ${role} sending`, msg);
     target.postMessage(msg, {targetOrigin: "*"});  
   });
 }
@@ -131,7 +128,6 @@ export function create_rpc_wrapper(target, procedure) {
   }
 }
 
-//attach an additional message port to the host
 export function attach_host(msg_port) {
   let msg = {
     type: "attach",
@@ -140,7 +136,6 @@ export function attach_host(msg_port) {
   host.postMessage(msg, {targetOrigin: "*", transfer: [msg_port]});
 }
 
-//tell a child frame to set a message port as the host rpc target
 export function set_host(frame, msg_port) {
   let msg = {
     type: "set_host",
@@ -169,7 +164,6 @@ export async function wait_on_frame(frame) {
   }
 }
 
-//handle the initial set_host message from the host
 function host_set_handler(event) {
   let msg = event.data;
   let msg_port = event.ports[0];
@@ -202,7 +196,6 @@ export function set_on_attach(callback) {
   on_attach = callback;
 }
 
-//create an rpc target for the host if we are in a child frame
 if (self.parent !== globalThis || typeof globalThis.importScripts === "function") {
   host = new RPCTarget();
   host.onmessage = message_listener;
