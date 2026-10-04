@@ -10,7 +10,7 @@ export async function fetch(resource, init={}) {
     params.headers = params.headers || Object.fromEntries(resource.headers);
     params.method = params.method || resource.method;
 
-    if (params.body.size === 0) {
+    if (params.body && params.body.size === 0) {
       delete params.body;
     }
   }
