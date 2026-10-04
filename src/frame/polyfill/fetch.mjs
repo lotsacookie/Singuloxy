@@ -1,9 +1,8 @@
 import { ctx } from "../context.mjs";
 import * as network from "../network.mjs";
 
-export async function fetch(resource, params={}) {
-  console.log("DEBUG fetch", resource, params);
-  //parse resources and convert to a friendly form
+export async function fetch(resource, init={}) {
+  let params = {...init};
   let url = resource;
   if (resource instanceof Request) {
     url = resource.url;
@@ -15,18 +14,19 @@ export async function fetch(resource, params={}) {
       delete params.body;
     }
   }
+  if (params.headers instanceof Headers) {
+    params.headers = Object.fromEntries(params.headers);
+  }
   url = (new URL(url, ctx.location.href)).href;
   if (params.body instanceof ReadableStream) {
     params.duplex = "half";
   }
-  if (params.signal) //abortsignal cant be cloned
+  if (params.signal)
     delete params.signal;
 
-  //figure out the request body
   let request_obj = new Request("http://127.0.0.1/", params);
   let array_buffer = await request_obj.arrayBuffer();
   params.body = array_buffer.byteLength ? array_buffer : undefined;
 
-  //perform the request
   return await network.fetch(url, params);
 }
