@@ -42,12 +42,22 @@ export class FakeCookieJar {
     this.#purge_expired();
     let parts = [];
     for (let [name, entry] of this.#map) {
+      if (entry.http_only) continue;
       parts.push(`${name}=${entry.value}`);
     }
     return parts.join("; ");
   }
 
-  set(cookie_string) {
+  get_header() {
+    this.#purge_expired();
+    let parts = [];
+    for (let [name, entry] of this.#map) {
+      parts.push(`${name}=${entry.value}`);
+    }
+    return parts.join("; ");
+  }
+
+  set(cookie_string, from_http = false) {
     let parts = cookie_string.split(";").map((p) => p.trim());
     let [name_value, ...attr_parts] = parts;
     let eq_index = name_value.indexOf("=");
@@ -57,6 +67,8 @@ export class FakeCookieJar {
     if (!name) return;
 
     let expires = null;
+    let max_age_seen = false;
+    let http_only = false;
     for (let attr of attr_parts) {
       let attr_eq = attr.indexOf("=");
       let attr_name = (attr_eq === -1 ? attr : attr.substring(0, attr_eq)).trim().toLowerCase();
@@ -64,19 +76,28 @@ export class FakeCookieJar {
 
       if (attr_name === "max-age") {
         let seconds = parseInt(attr_value, 10);
-        expires = Number.isFinite(seconds) ? Date.now() + seconds * 1000 : null;
+        if (Number.isFinite(seconds)) {
+          expires = Date.now() + seconds * 1000;
+          max_age_seen = true;
+        }
       }
-      else if (attr_name === "expires" && expires === null) {
+      else if (attr_name === "expires" && !max_age_seen) {
         let parsed = Date.parse(attr_value);
         expires = Number.isFinite(parsed) ? parsed : null;
       }
+      else if (attr_name === "httponly") {
+        http_only = true;
+      }
     }
+
+    let existing = this.#map.get(name);
+    if (!from_http && existing && existing.http_only) return;
 
     if (expires !== null && expires <= Date.now()) {
       this.#map.delete(name);
     }
     else {
-      this.#map.set(name, { value, expires });
+      this.#map.set(name, { value, expires, http_only: from_http && http_only });
     }
     this.#sync();
   }
