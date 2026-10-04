@@ -65,10 +65,6 @@ function rewrite_element_single(element) {
     }
   }
 
-  element.addEventListener("focus", () => {
-    ctx.document.activeElement = element;
-  })
-
   return promises;
 }
 
