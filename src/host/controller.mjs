@@ -48,6 +48,12 @@ let frame_html = `
 export const iframes = {};
 export const persist_storage_key = "proxy_local_storage";
 export let local_storage = {};
+export const persist_cookie_key = "proxy_cookie_storage";
+export let cookie_storage = {};
+try {
+  cookie_storage = JSON.parse(localStorage.getItem(persist_cookie_key)) || {};
+}
+catch {}
 try {
   local_storage = JSON.parse(localStorage.getItem(persist_storage_key)) || {};
 }
@@ -118,10 +124,17 @@ export class ProxyFrame {
         let options = {};
         if (form_data) {
           console.log("placing post request:", form_data);
-          options = {
-            method: "POST",
-            headers: {"Content-Type": form_data.enctype},
-            body: form_data.body
+          let body = form_data.body;
+
+          if (form_data.enctype === "multipart/form-data" && Array.isArray(body)) {
+            let rebuilt = new FormData();
+            for (let [key, value] of body) rebuilt.append(key, value);
+            body = rebuilt;
+          }
+
+          options = { method: "POST", body };
+          if (!(body instanceof FormData)) {
+            options.headers = {"Content-Type": form_data.enctype};
           }
         }
         let response = await network.session.fetch(url, options);
@@ -155,6 +168,7 @@ export class ProxyFrame {
         settings: settings,
         default_settings: this.default_settings,
         local_storage: local_storage[this.url.origin],
+        cookies: cookie_storage[this.url.origin],
         version: version
       });
     }
@@ -168,6 +182,7 @@ export class ProxyFrame {
         settings: settings,
         default_settings: this.default_settings,
         local_storage: undefined,
+        cookies: undefined,
         version: version
       });
     }
@@ -195,6 +210,15 @@ rpc.rpc_handlers["local_storage"] = async (frame_id, entries) => {
   local_storage[frame.url.origin] = entries;
   if (window.origin) {
     localStorage.setItem(persist_storage_key, JSON.stringify(local_storage));
+  }
+}
+
+rpc.rpc_handlers["cookies"] = async (frame_id, entries) => {
+  let frame = iframes[frame_id];
+  if (!frame) return;
+  cookie_storage[frame.url.origin] = entries;
+  if (window.origin) {
+    localStorage.setItem(persist_cookie_key, JSON.stringify(cookie_storage));
   }
 }
 
