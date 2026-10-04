@@ -65,7 +65,14 @@ export async function fetch(url, options) {
     throw TypeError("Invalid URL");
   }
 
-  let fetch_data = await rpc_fetch(url.href, options);
+  let fetch_data;
+  try {
+    fetch_data = await rpc_fetch(url.href, options);
+  }
+  catch (e) {
+    console.error("sandstone: proxied fetch failed:", url.href, e);
+    throw new TypeError("Failed to fetch " + url.href);
+  }
   let response = new Response(fetch_data.body);
   for (let key in fetch_data.items) {
     Object.defineProperty(response, key, {
