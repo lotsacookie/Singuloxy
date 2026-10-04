@@ -33,35 +33,23 @@ function page_origin() {
 function is_page_origin(url_obj) {
   let origin = page_origin();
   if (!origin) return false;
-  let compare = new URL(url_obj.href);
-  if (compare.protocol === "ws:") compare.protocol = "http:";
-  if (compare.protocol === "wss:") compare.protocol = "https:";
-  return compare.origin === origin;
+  return url_obj.origin === origin;
 }
 
-function cookie_header_for(url_obj) {
-  if (!is_page_origin(url_obj)) return "";
-  let jar = get_cookie_jar();
-  if (!jar) return "";
-  return jar.get_header();
-}
-
-function add_cookie_to_options(url_obj, options) {
-  let cookie = cookie_header_for(url_obj);
-  if (!cookie) return options;
-  let headers = new Headers((options && options.headers) || {});
-  if (headers.has("cookie")) return options;
-  headers.set("cookie", cookie);
-  return {...options, headers: Object.fromEntries(headers)};
-}
-
-function store_response_cookies(url_obj, set_cookies) {
-  if (!set_cookies.length) return;
-  if (!is_page_origin(url_obj)) return;
-  let jar = get_cookie_jar();
-  if (!jar) return;
-  for (let cookie of set_cookies) {
-    jar.set(cookie, true);
+function store_response_cookies(url_obj, fetch_data) {
+  try {
+    if (!is_page_origin(url_obj)) return;
+    let jar = get_cookie_jar();
+    if (!jar) return;
+    let pairs = fetch_data.items?.raw_headers || fetch_data.headers || [];
+    for (let [key, value] of pairs) {
+      if (String(key).toLowerCase() === "set-cookie") {
+        jar.set(String(value), true);
+      }
+    }
+  }
+  catch (e) {
+    console.error("sandstone: could not store response cookies", e);
   }
 }
 
@@ -77,8 +65,7 @@ export async function fetch(url, options) {
     throw TypeError("Invalid URL");
   }
 
-  let request_options = add_cookie_to_options(url, options);
-  let fetch_data = await rpc_fetch(url.href, request_options);
+  let fetch_data = await rpc_fetch(url.href, options);
   let response = new Response(fetch_data.body);
   for (let key in fetch_data.items) {
     Object.defineProperty(response, key, {
@@ -87,15 +74,13 @@ export async function fetch(url, options) {
   }
 
   let headers = new Headers();
-  let set_cookies = [];
   for (let [key, value] of fetch_data.headers) {
     headers.append(key, value);
-    if (key.toLowerCase() === "set-cookie") set_cookies.push(value);
   }
   Object.defineProperty(response, "headers", {
     value: headers
   });
-  store_response_cookies(url, set_cookies);
+  store_response_cookies(url, fetch_data);
 
   return response;
 };
@@ -147,8 +132,6 @@ export class WebSocket extends EventTarget {
       "Origin": ctx.location.origin,
       "User-Agent": navigator.userAgent,
     };
-    let cookie = cookie_header_for(new URL(this.url));
-    if (cookie) headers["Cookie"] = cookie;
 
     try {
       this.#ws_id = await rpc_ws_new(loader.frame_id, this.url, this.protocols, {
