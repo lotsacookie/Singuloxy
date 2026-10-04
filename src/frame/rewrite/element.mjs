@@ -19,6 +19,10 @@ function rewrite_element_single(element) {
     promise = rewrite.stylesheet(element);
   else if (element instanceof HTMLStyleElement)
     promise = rewrite.style(element);
+  else if (element instanceof HTMLScriptElement && element.hasAttribute("nomodule"))
+    {}
+  else if (element instanceof HTMLScriptElement && element.getAttribute("type") === "module")
+    promise = rewrite.module_script(element);
   else if (element instanceof HTMLScriptElement)
     promise = rewrite.script(element);
   else if (element instanceof HTMLFormElement)
