@@ -6,8 +6,11 @@ export const ws_connections = {};
 export let session = null;
 
 const MAX_CONCURRENT_REQUESTS = 16;
+const MIN_CONCURRENT_REQUESTS = 2;
+const GROW_AFTER_SUCCESSES = 10;
+const COOLDOWN_MS = 1500;
 const MAX_RETRIES = 3;
-const MAX_TLS_RETRIES = 5;
+const MAX_TLS_RETRIES = 6;
 const MAX_PER_HOST = 6;
 const MAX_RESUMES = 5;
 const REQUEST_TIMEOUT_MS = 45 * 1000;
@@ -15,9 +18,6 @@ const COALESCE_BYTES = 2 * 1024 * 1024;
 const COALESCE_WAIT_MS = 8;
 const STREAM_IDLE_MS = 2 * 60 * 1000;
 const MAX_OPEN_STREAMS = 48;
-const RECOVER_AFTER_FAILURES = 4;
-const RECOVER_AFTER_CONSECUTIVE = 4;
-const RECOVER_MIN_GAP_MS = 10 * 1000;
 const TRANSIENT_ERRORS = /error code (7|28|35|52|55|56)\b/;
 const TLS_ERROR = /error code 35\b/;
 const CONNECTION_ERRORS = /error code (7|35)\b/;
@@ -37,14 +37,13 @@ const streams = {};
 const segmented_hosts = new Set();
 
 let active_requests = 0;
+let concurrency_limit = MAX_CONCURRENT_REQUESTS;
+let successes_since_shrink = 0;
+let cooldown_until = 0;
+let last_shrink_log = 0;
 const request_queue = [];
 
-const host_tls_failures = new Map();
-let consecutive_failures = 0;
 let wisp_pool = [];
-let wisp_index = 0;
-let last_recovery = 0;
-let recovering = null;
 let ws_url = null;
 
 let session_ready_resolve;
@@ -166,22 +165,17 @@ export function set_websocket(url) {
 
 export function set_wisp_pool(urls) {
   wisp_pool = (Array.isArray(urls) ? urls : []).filter((url) => typeof url === "string" && url);
-  wisp_index = Math.max(0, wisp_pool.indexOf(current_ws_url()));
 }
 
-function current_ws_url() {
-  if (ws_url) return ws_url;
-  for (let key of ["websocket_url", "wisp_url", "websocket"]) {
-    let value = libcurl[key];
-    if (typeof value === "string" && value) return value;
-  }
-  return null;
-}
-
-function next_wisp() {
-  if (wisp_pool.length < 2) return current_ws_url();
-  wisp_index = (wisp_index + 1) % wisp_pool.length;
-  return wisp_pool[wisp_index];
+export function get_connection_info() {
+  return {
+    websocket: ws_url,
+    wisp_pool: [...wisp_pool],
+    concurrency_limit: concurrency_limit,
+    active_requests: active_requests,
+    queued_requests: request_queue.length,
+    open_streams: Object.keys(streams).length
+  };
 }
 
 function make_session() {
@@ -194,57 +188,15 @@ function make_session() {
   }
 }
 
-function recover_session(force = false) {
-  if (recovering) return recovering;
-  if (!force && Date.now() - last_recovery < RECOVER_MIN_GAP_MS) return null;
-  last_recovery = Date.now();
-  host_tls_failures.clear();
-  consecutive_failures = 0;
-
-  recovering = (async () => {
-    console.warn("sandstone host: connection problems detected, resetting the wisp connection and libcurl session");
-    try {
-      let target = next_wisp() || current_ws_url();
-      if (target) {
-        console.warn("sandstone host: reconnecting wisp server", target);
-        libcurl.set_websocket(target);
-      }
-    }
-    catch (e) {
-      console.warn("sandstone host: reconnect failed:", error_message(e));
-    }
-    await sleep(500);
-    session = make_session();
-  })().catch((e) => {
-    console.error("sandstone host: session recovery failed:", error_message(e));
-  }).finally(() => {
-    recovering = null;
-  });
-  return recovering;
-}
-
-function note_success(url) {
-  consecutive_failures = 0;
-  host_tls_failures.delete(host_of(url));
-}
-
-function note_failure(error, url) {
-  let message = error_message(error);
-
-  if (CONNECTION_ERRORS.test(message)) {
-    consecutive_failures++;
-    if (consecutive_failures >= RECOVER_AFTER_CONSECUTIVE) recover_session();
+function drain_requests() {
+  while (request_queue.length > 0 && active_requests < concurrency_limit) {
+    active_requests++;
+    request_queue.shift()();
   }
-
-  if (!TLS_ERROR.test(message)) return;
-  let host = host_of(url);
-  let count = (host_tls_failures.get(host) || 0) + 1;
-  host_tls_failures.set(host, count);
-  if (count >= RECOVER_AFTER_FAILURES) recover_session();
 }
 
 function acquire_slot() {
-  if (active_requests < MAX_CONCURRENT_REQUESTS) {
+  if (active_requests < concurrency_limit && request_queue.length === 0) {
     active_requests++;
     return Promise.resolve();
   }
@@ -254,13 +206,45 @@ function acquire_slot() {
 }
 
 function release_slot() {
-  let next = request_queue.shift();
-  if (next) next();
-  else active_requests--;
+  active_requests--;
+  drain_requests();
+}
+
+function shrink_concurrency() {
+  let previous = concurrency_limit;
+  concurrency_limit = Math.max(MIN_CONCURRENT_REQUESTS, Math.floor(concurrency_limit / 2));
+  successes_since_shrink = 0;
+  cooldown_until = Date.now() + COOLDOWN_MS;
+  if (concurrency_limit !== previous && Date.now() - last_shrink_log > 5000) {
+    last_shrink_log = Date.now();
+    console.warn(`sandstone host: connection errors, lowering concurrent requests from ${previous} to ${concurrency_limit}`);
+  }
+}
+
+function grow_concurrency() {
+  successes_since_shrink++;
+  if (successes_since_shrink < GROW_AFTER_SUCCESSES) return;
+  successes_since_shrink = 0;
+  if (concurrency_limit >= MAX_CONCURRENT_REQUESTS) return;
+  concurrency_limit++;
+  drain_requests();
+}
+
+function note_success() {
+  grow_concurrency();
+}
+
+function note_failure(error) {
+  if (CONNECTION_ERRORS.test(error_message(error))) shrink_concurrency();
 }
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function wait_for_cooldown() {
+  let remaining = cooldown_until - Date.now();
+  if (remaining > 0) await sleep(remaining + Math.random() * 300);
 }
 
 const host_active = new Map();
@@ -339,24 +323,27 @@ async function fetch_with_retry(url, options) {
   let attempt = 0;
 
   while (true) {
-    if (recovering) await recovering;
+    await wait_for_cooldown();
     try {
       let response = await with_timeout(
         session.fetch(url, options ? {...options} : undefined),
         REQUEST_TIMEOUT_MS,
         url
       );
-      note_success(url);
+      note_success();
       return response;
     }
     catch (e) {
-      note_failure(e, url);
+      note_failure(e);
       let message = error_message(e);
       let retryable = can_retry ? is_transient(e) : PRE_REQUEST_ERRORS.test(message);
-      let limit = TLS_ERROR.test(message) ? MAX_TLS_RETRIES : MAX_RETRIES;
+      let tls = TLS_ERROR.test(message);
+      let limit = tls ? MAX_TLS_RETRIES : MAX_RETRIES;
       if (!retryable || attempt >= limit) throw e;
       attempt++;
-      await sleep(Math.min(400 * 2 ** (attempt - 1), 4000) + Math.random() * 300);
+      let base = tls ? 800 : 400;
+      let cap = tls ? 8000 : 4000;
+      await sleep(Math.min(base * 2 ** (attempt - 1), cap) + Math.random() * 400);
     }
   }
 }
@@ -372,8 +359,8 @@ export async function fetch_page(url, options) {
     catch (e) {
       if (attempt >= 2 || !CONNECTION_ERRORS.test(error_message(e))) throw e;
       attempt++;
-      console.warn("sandstone host: page request failed, resetting the connection and retrying:", url, error_message(e));
-      await recover_session(true);
+      console.warn("sandstone host: page request failed, retrying:", url, error_message(e));
+      await sleep(2000 * attempt);
     }
   }
 }
