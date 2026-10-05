@@ -5,6 +5,100 @@ const PICTURE_IMAGE_TYPES = new Set([
   "image/webp", "image/avif", "image/jpeg", "image/png", "image/gif", "image/svg+xml", "image/apng"
 ]);
 
+const FETCH_ATTEMPTS = 3;
+const MAX_MEDIA_CONCURRENCY = 12;
+const IMAGE_CACHE_LIMIT = 200;
+const IMAGE_CACHE_MAX_BYTES = 2 * 1024 * 1024;
+const LAZY_MARGIN = "800px";
+
+const image_cache = new Map();
+let active_media = 0;
+const media_queue = [];
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function acquire_media_slot() {
+  if (active_media < MAX_MEDIA_CONCURRENCY) {
+    active_media++;
+    return Promise.resolve();
+  }
+  return new Promise((resolve) => media_queue.push(resolve));
+}
+
+function release_media_slot() {
+  let next = media_queue.shift();
+  if (next) next();
+  else active_media--;
+}
+
+async function download_blob(url) {
+  let last_error;
+  for (let attempt = 0; attempt < FETCH_ATTEMPTS; attempt++) {
+    let permanent = false;
+    try {
+      let response = await network.fetch(url);
+      if (response.ok === false) {
+        try { await response.body?.cancel(); } catch {}
+        permanent = (
+          response.status >= 400 && response.status < 500 &&
+          response.status !== 408 && response.status !== 429
+        );
+        throw new Error("status " + response.status);
+      }
+      return await response.blob();
+    }
+    catch (e) {
+      last_error = e;
+      if (permanent) break;
+      await sleep(400 * (attempt + 1) + Math.random() * 250);
+    }
+  }
+  throw last_error;
+}
+
+function fetch_blob(url, cacheable) {
+  if (cacheable && image_cache.has(url)) return image_cache.get(url);
+
+  let task = (async () => {
+    await acquire_media_slot();
+    try {
+      return await download_blob(url);
+    }
+    finally {
+      release_media_slot();
+    }
+  })();
+
+  if (cacheable) {
+    image_cache.set(url, task);
+    task.then(
+      (blob) => { if (blob.size > IMAGE_CACHE_MAX_BYTES) image_cache.delete(url); },
+      () => image_cache.delete(url)
+    );
+    while (image_cache.size > IMAGE_CACHE_LIMIT)
+      image_cache.delete(image_cache.keys().next().value);
+  }
+  return task;
+}
+
+function wait_until_near(element) {
+  if (!(element instanceof HTMLImageElement)) return Promise.resolve();
+  if (element.loading !== "lazy" || !element.isConnected) return Promise.resolve();
+  if (typeof IntersectionObserver === "undefined") return Promise.resolve();
+
+  return new Promise((resolve) => {
+    let observer = new IntersectionObserver((entries) => {
+      if (entries.some((entry) => entry.isIntersecting)) {
+        observer.disconnect();
+        resolve();
+      }
+    }, {rootMargin: LAZY_MARGIN});
+    observer.observe(element);
+  });
+}
+
 function resolve_http_url(value) {
   if (!value) return null;
   let text = String(value);
@@ -61,28 +155,35 @@ function pick_picture_source(image) {
 }
 
 export function rewrite_media(media_element) {
+  if (media_element.__media_hooked__) return;
+  media_element.__media_hooked__ = true;
+
+  let raw_set = (name, value) => {
+    Reflect.apply(Element.prototype.setAttribute, media_element, [name, value]);
+  };
+
   let media_src = media_element.getAttribute("src") || media_element.src;
-  
+  if (!media_src) media_src = media_element.getAttribute("__src") || "";
+
   if (media_element instanceof HTMLVideoElement) {
     let source = media_element.querySelector("source[src]");
-    while (media_element.lastChild !== source) 
+    while (media_element.lastChild !== source)
       media_element.lastChild.remove();
   }
 
+  let is_image = media_element instanceof HTMLImageElement;
   let media_url = "";
   let latest_request = 0;
   let allow_error = false;
 
   let fetch_src = async (value) => {
     let request_id = ++latest_request;
-    media_element.setAttribute("__src", value);
+    raw_set("__src", value);
     try {
       media_url = convert_url(value, ctx.location.href);
-      let response = await network.fetch(media_url);
-      if (response.ok === false) {
-        throw new Error("status " + response.status);
-      }
-      let media_blob = await response.blob();
+      await wait_until_near(media_element);
+      if (request_id !== latest_request) return;
+      let media_blob = await fetch_blob(media_url, is_image);
       if (request_id !== latest_request) return;
       let blob_url = URL.createObjectURL(media_blob);
       media_element.src = blob_url;
@@ -100,7 +201,7 @@ export function rewrite_media(media_element) {
       let parent = media_element.parentNode;
       while (parent && !(parent instanceof HTMLVideoElement))
         parent = parent.parentNode;
-      if (!parent) 
+      if (!parent)
         return;
 
       parent.load();
@@ -108,6 +209,7 @@ export function rewrite_media(media_element) {
       parent.play();
     }
   };
+
   let src_descriptor = intercept_property(media_element, "src", {
     get() {
       return media_url || src_descriptor.get.call(media_element);
@@ -116,9 +218,29 @@ export function rewrite_media(media_element) {
       if (!resolve_http_url(value))
         src_descriptor.set.call(media_element, value);
       else {
-        media_element.src = "";
+        src_descriptor.set.call(media_element, "");
         fetch_src(value);
       }
+    }
+  });
+
+  let apply_srcset = (value) => {
+    value = value === null || value === undefined ? "" : String(value);
+    raw_set("__srcset", value);
+    raw_set("srcset", "");
+    if (is_image && value) {
+      let best = pick_srcset(value);
+      if (best) media_element.src = best;
+    }
+  };
+
+  let srcset_descriptor = intercept_property(media_element, "srcset", {
+    configurable: true,
+    get() {
+      return media_element.getAttribute("__srcset") || "";
+    },
+    set(value) {
+      apply_srcset(value);
     }
   });
 
@@ -130,24 +252,29 @@ export function rewrite_media(media_element) {
   }, true);
 
   proxy_function(media_element, "setAttribute", (target, this_arg, args) => {
-    if (args[0] === "src")  {
+    let name = String(args[0]).toLowerCase();
+    if (name === "src")  {
       media_element.src = args[1];
+      return;
+    }
+    if (name === "srcset" && srcset_descriptor) {
+      media_element.srcset = args[1];
       return;
     }
     return Reflect.apply(target, this_arg, args);
   })
-  
-  let srcset = media_element.getAttribute("srcset");
+
+  let srcset = media_element.getAttribute("srcset") || media_element.getAttribute("__srcset");
   if (srcset) {
-    media_element.setAttribute("__srcset", srcset);
-    media_element.setAttribute("srcset", "");
-    if (media_element instanceof HTMLImageElement && !media_src) {
+    raw_set("__srcset", srcset);
+    raw_set("srcset", "");
+    if (is_image && !media_src) {
       let best = pick_srcset(srcset);
       if (best) media_src = best;
     }
   }
 
-  if (!media_src && media_element instanceof HTMLImageElement) {
+  if (!media_src && is_image) {
     let from_picture = pick_picture_source(media_element);
     if (from_picture) media_src = from_picture;
   }
