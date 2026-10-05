@@ -10,7 +10,7 @@ const MIN_CONCURRENT_REQUESTS = 2;
 const GROW_AFTER_SUCCESSES = 10;
 const COOLDOWN_MS = 1500;
 const MAX_RETRIES = 3;
-const MAX_TLS_RETRIES = 6;
+const MAX_TLS_RETRIES = 3;
 const MAX_PER_HOST = 6;
 const MAX_RESUMES = 5;
 const REQUEST_TIMEOUT_MS = 45 * 1000;
@@ -18,12 +18,26 @@ const COALESCE_BYTES = 2 * 1024 * 1024;
 const COALESCE_WAIT_MS = 8;
 const STREAM_IDLE_MS = 2 * 60 * 1000;
 const MAX_OPEN_STREAMS = 48;
+const HOST_FAIL_THRESHOLD = 3;
+const HOST_BLOCK_MS = 30 * 1000;
+const SHRINK_HOST_COUNT = 3;
+const SHRINK_WINDOW_MS = 10 * 1000;
+const TEST_TIMEOUT_MS = 15 * 1000;
 const TRANSIENT_ERRORS = /error code (7|28|35|52|55|56)\b/;
 const TLS_ERROR = /error code 35\b/;
 const CONNECTION_ERRORS = /error code (7|35)\b/;
 const PRE_REQUEST_ERRORS = /error code (7|35)\b/;
 const PARTIAL_ERRORS = /error code (18|56)\b/;
 const TIMEOUT = Symbol("timeout");
+
+const DEFAULT_TEST_URLS = [
+  "https://example.com/",
+  "https://www.roblox.com/",
+  "https://thumbnails.roblox.com/",
+  "https://catalog.roblox.com/",
+  "https://games.roblox.com/",
+  "https://roblox-poc.global.ssl.fastly.net/"
+];
 
 const SEGMENT_BYTES = 4 * 1024 * 1024;
 const SEGMENT_PARALLEL = 4;
@@ -35,6 +49,8 @@ const LARGE_FILE_PATTERN = /\.(zip|7z|rar|tar|pk3|pak|pck|wasm|data|bin|iso|mp4|
 
 const streams = {};
 const segmented_hosts = new Set();
+const host_health = new Map();
+const recent_failures = new Map();
 
 let active_requests = 0;
 let concurrency_limit = MAX_CONCURRENT_REQUESTS;
@@ -103,6 +119,7 @@ const BLOCKED_URL_PATTERNS = [
   /^https:\/\/raw\.githubusercontent\.com\/easylist\//i,
   /^https:\/\/[a-z0-9]+-\d+-\d+-\d+-\d+\.roblox\.com\/_\/_\/1px\.gif/i,
   /^https:\/\/sc0(ak)?\.rbxcdn\.com\/test-50kb\.png/i,
+  /^https:\/\/roblox-poc\.global\.ssl\.fastly\.net\/test-50kb\.png/i,
   /^https:\/\/lms-[a-z0-9-]+\.roblox\.com\/1x1\.png/i
 ];
 
@@ -168,14 +185,50 @@ export function set_wisp_pool(urls) {
 }
 
 export function get_connection_info() {
+  let now = Date.now();
+  let paused_hosts = [];
+  for (let [host, health] of host_health) {
+    if (health.blocked_until > now) paused_hosts.push(host);
+  }
   return {
     websocket: ws_url,
     wisp_pool: [...wisp_pool],
     concurrency_limit: concurrency_limit,
     active_requests: active_requests,
     queued_requests: request_queue.length,
-    open_streams: Object.keys(streams).length
+    open_streams: Object.keys(streams).length,
+    paused_hosts: paused_hosts
   };
+}
+
+export async function test_hosts(urls = DEFAULT_TEST_URLS) {
+  if (!session) await session_ready;
+  let results = [];
+
+  for (let url of urls) {
+    let started = performance.now();
+    try {
+      let response = await with_timeout(session.fetch(url, {method: "HEAD"}), TEST_TIMEOUT_MS, url);
+      results.push({
+        url: url,
+        result: "ok",
+        status: response.status,
+        ms: Math.round(performance.now() - started)
+      });
+      discard_response(response);
+    }
+    catch (e) {
+      results.push({
+        url: url,
+        result: error_message(e),
+        status: "",
+        ms: Math.round(performance.now() - started)
+      });
+    }
+  }
+
+  console.table(results);
+  return results;
 }
 
 function make_session() {
@@ -217,7 +270,7 @@ function shrink_concurrency() {
   cooldown_until = Date.now() + COOLDOWN_MS;
   if (concurrency_limit !== previous && Date.now() - last_shrink_log > 5000) {
     last_shrink_log = Date.now();
-    console.warn(`sandstone host: connection errors, lowering concurrent requests from ${previous} to ${concurrency_limit}`);
+    console.warn(`sandstone host: connection errors across several hosts, lowering concurrent requests from ${previous} to ${concurrency_limit}`);
   }
 }
 
@@ -230,12 +283,35 @@ function grow_concurrency() {
   drain_requests();
 }
 
-function note_success() {
+function is_host_blocked(url) {
+  let health = host_health.get(host_of(url));
+  return !!health && health.blocked_until > Date.now();
+}
+
+function note_success(url) {
+  host_health.delete(host_of(url));
+  recent_failures.delete(host_of(url));
   grow_concurrency();
 }
 
-function note_failure(error) {
-  if (CONNECTION_ERRORS.test(error_message(error))) shrink_concurrency();
+function note_failure(error, url) {
+  if (!CONNECTION_ERRORS.test(error_message(error))) return;
+  let host = host_of(url);
+  let now = Date.now();
+
+  let health = host_health.get(host) || {failures: 0, blocked_until: 0};
+  health.failures++;
+  if (health.failures >= HOST_FAIL_THRESHOLD && health.blocked_until <= now) {
+    health.blocked_until = now + HOST_BLOCK_MS;
+    console.warn(`sandstone host: ${host} keeps failing to connect, pausing requests to it for ${HOST_BLOCK_MS / 1000}s. This host is probably blocked by, or incompatible with, the current wisp server.`);
+  }
+  host_health.set(host, health);
+
+  recent_failures.set(host, now);
+  for (let [key, time] of recent_failures) {
+    if (now - time > SHRINK_WINDOW_MS) recent_failures.delete(key);
+  }
+  if (recent_failures.size >= SHRINK_HOST_COUNT) shrink_concurrency();
 }
 
 function sleep(ms) {
@@ -317,12 +393,15 @@ function with_timeout(promise, ms, url) {
   return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
 }
 
-async function fetch_with_retry(url, options) {
+async function fetch_with_retry(url, options, ignore_block = false) {
   let method = String(options?.method || "GET").toUpperCase();
   let can_retry = method === "GET" || method === "HEAD";
   let attempt = 0;
 
   while (true) {
+    if (!ignore_block && is_host_blocked(url)) {
+      throw new Error(`Request "${url}" failed with error code 35: host is paused after repeated connection failures`);
+    }
     await wait_for_cooldown();
     try {
       let response = await with_timeout(
@@ -330,19 +409,20 @@ async function fetch_with_retry(url, options) {
         REQUEST_TIMEOUT_MS,
         url
       );
-      note_success();
+      note_success(url);
       return response;
     }
     catch (e) {
-      note_failure(e);
+      note_failure(e, url);
       let message = error_message(e);
+      if (!ignore_block && is_host_blocked(url) && CONNECTION_ERRORS.test(message)) throw e;
       let retryable = can_retry ? is_transient(e) : PRE_REQUEST_ERRORS.test(message);
       let tls = TLS_ERROR.test(message);
       let limit = tls ? MAX_TLS_RETRIES : MAX_RETRIES;
       if (!retryable || attempt >= limit) throw e;
       attempt++;
       let base = tls ? 800 : 400;
-      let cap = tls ? 8000 : 4000;
+      let cap = tls ? 6000 : 4000;
       await sleep(Math.min(base * 2 ** (attempt - 1), cap) + Math.random() * 400);
     }
   }
@@ -354,7 +434,7 @@ export async function fetch_page(url, options) {
 
   while (true) {
     try {
-      return await fetch_with_retry(url, options);
+      return await fetch_with_retry(url, options, true);
     }
     catch (e) {
       if (attempt >= 2 || !CONNECTION_ERRORS.test(error_message(e))) throw e;
