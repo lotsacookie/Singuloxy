@@ -110,6 +110,10 @@ export class ProxyFrame {
     
     this.iframe.style.backgroundColor = "#222222";
     this.on_navigate();
+
+    let old_ports = [this.rpc_target.target, ...this.rpc_target.extra_targets].filter(Boolean);
+    network.end_streams_for(old_ports);
+
     this.iframe.src = get_frame_bundle();
     network.clean_ws_connections(this.id);
 
@@ -137,7 +141,7 @@ export class ProxyFrame {
             options.headers = {"Content-Type": form_data.enctype};
           }
         }
-        let response = await network.session.fetch(url, options);
+        let response = await network.fetch_page(url, options);
         html = await response.text();
         url = response.url;
       }
