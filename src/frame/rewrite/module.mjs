@@ -3,6 +3,7 @@ import * as astray from "astray";
 import * as network from "../network.mjs";
 import * as loader from "../loader.mjs";
 import * as parser from "../parser.mjs";
+import { script_state } from "./script.mjs";
 import { ctx, convert_url } from "../context.mjs";
 
 const module_cache = new Map();
@@ -212,6 +213,7 @@ export async function rewrite_module_script(script_element) {
   if (!loader.site_settings.allow_js) return;
 
   let order = module_order++;
+  let is_dynamic = script_state.phase !== "parsing";
   let script_url = script_element.getAttribute("src");
   let inline_text = script_element.textContent;
 
@@ -233,5 +235,10 @@ export async function rewrite_module_script(script_element) {
     return;
   }
 
-  pending_modules.push([order, script_element, blob_url]);
+  if (is_dynamic) {
+    await loader.eval_module(script_element, blob_url);
+  }
+  else {
+    pending_modules.push([order, script_element, blob_url]);
+  }
 }
