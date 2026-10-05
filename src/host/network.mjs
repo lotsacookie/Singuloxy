@@ -7,6 +7,8 @@ export let session = null;
 
 const MAX_CONCURRENT_REQUESTS = 16;
 const MAX_RETRIES = 3;
+const MAX_TLS_RETRIES = 5;
+const MAX_PER_HOST = 6;
 const MAX_RESUMES = 5;
 const REQUEST_TIMEOUT_MS = 45 * 1000;
 const COALESCE_BYTES = 2 * 1024 * 1024;
@@ -17,6 +19,7 @@ const RECOVER_AFTER_FAILURES = 6;
 const RECOVER_MIN_GAP_MS = 15 * 1000;
 const TRANSIENT_ERRORS = /error code (7|28|35|52|55|56)\b/;
 const TLS_ERROR = /error code 35\b/;
+const PRE_REQUEST_ERRORS = /error code (7|35)\b/;
 const TIMEOUT = Symbol("timeout");
 
 const streams = {};
@@ -184,6 +187,47 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+const host_active = new Map();
+const host_queues = new Map();
+
+function host_of(url) {
+  try {
+    return new URL(url).host;
+  }
+  catch {
+    return "";
+  }
+}
+
+function acquire_host_slot(host) {
+  let active = host_active.get(host) || 0;
+  if (active < MAX_PER_HOST) {
+    host_active.set(host, active + 1);
+    return Promise.resolve();
+  }
+  return new Promise((resolve) => {
+    let queue = host_queues.get(host);
+    if (!queue) {
+      queue = [];
+      host_queues.set(host, queue);
+    }
+    queue.push(resolve);
+  });
+}
+
+function release_host_slot(host) {
+  let queue = host_queues.get(host);
+  let next = queue && queue.shift();
+  if (queue && queue.length === 0) host_queues.delete(host);
+  if (next) {
+    next();
+    return;
+  }
+  let active = (host_active.get(host) || 1) - 1;
+  if (active <= 0) host_active.delete(host);
+  else host_active.set(host, active);
+}
+
 function error_message(error) {
   return String(error?.message ?? error);
 }
@@ -231,9 +275,12 @@ async function fetch_with_retry(url, options) {
     }
     catch (e) {
       note_failure(e);
-      if (!can_retry || attempt >= MAX_RETRIES || !is_transient(e)) throw e;
+      let message = error_message(e);
+      let retryable = can_retry ? is_transient(e) : PRE_REQUEST_ERRORS.test(message);
+      let limit = TLS_ERROR.test(message) ? MAX_TLS_RETRIES : MAX_RETRIES;
+      if (!retryable || attempt >= limit) throw e;
       attempt++;
-      await sleep(400 * attempt + Math.random() * 300);
+      await sleep(Math.min(400 * 2 ** (attempt - 1), 4000) + Math.random() * 300);
     }
   }
 }
@@ -385,6 +432,8 @@ rpc_handlers["fetch"] = async function(url, options) {
   if (tracker_blocking && is_blocked(url)) return blocked_payload(url);
 
   if (!session) await session_ready;
+  let host = host_of(url);
+  await acquire_host_slot(host);
   await acquire_slot();
 
   try {
@@ -464,6 +513,7 @@ rpc_handlers["fetch"] = async function(url, options) {
   }
   finally {
     release_slot();
+    release_host_slot(host);
   }
 }
 
