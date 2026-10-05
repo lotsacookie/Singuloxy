@@ -13,6 +13,8 @@ const module_parse_attempts = [
   {webcompat: true, next: true, module: true}
 ];
 
+const MAX_VALIDATE_LENGTH = 8 * 1024 * 1024;
+
 function parse_js(js, is_module) {
   let attempts = is_module ? module_parse_attempts : script_parse_attempts;
   let last_error;
@@ -27,6 +29,49 @@ function parse_js(js, is_module) {
   }
 
   throw last_error;
+}
+
+function can_parse(js, is_module) {
+  let attempts = is_module ? module_parse_attempts : script_parse_attempts;
+  for (let options of attempts) {
+    try {
+      meriyah.parse(js, options);
+      return true;
+    }
+    catch {}
+  }
+  return false;
+}
+
+function is_non_reference(node, parent) {
+  switch (parent.type) {
+    case "UpdateExpression":
+    case "RestElement":
+    case "ArrayPattern":
+    case "ImportSpecifier":
+    case "ImportDefaultSpecifier":
+    case "ImportNamespaceSpecifier":
+    case "ExportSpecifier":
+      return true;
+    case "CatchClause":
+      return parent.param === node;
+    case "ClassDeclaration":
+    case "ClassExpression":
+      return parent.id === node;
+    case "LabeledStatement":
+    case "BreakStatement":
+    case "ContinueStatement":
+      return parent.label === node;
+    case "ForInStatement":
+    case "ForOfStatement":
+      return parent.left === node;
+    case "PropertyDefinition":
+      return parent.key === node && !parent.computed;
+    case "MemberExpression":
+      return parent.property === node && !parent.computed;
+    default:
+      return false;
+  }
 }
 
 class ASTVisitor {
@@ -58,7 +103,9 @@ class ASTVisitor {
 
   Identifier(node) {
     let parent = node.path.parent;
-    if (parent.type === "MemberExpression" && parent.start !== node.start) 
+    if (!parent) 
+      return;
+    if (is_non_reference(node, parent))
       return;
     if (parent.type === "VariableDeclarator" && parent.id === node)
       return;
@@ -157,6 +204,11 @@ export function rewrite_js(js, is_module = false) {
     prev_offset = offset;
   }
   rewritten_js += js.substring(prev_offset);
-  
-  return rewritten_js || js;
+
+  let result = rewritten_js || js;
+  if (ast_visitor.rewrites.length > 0 && js.length <= MAX_VALIDATE_LENGTH && !can_parse(result, is_module)) {
+    console.warn("sandstone: rewriting produced invalid JS, script left UNREWRITTEN (it will bypass the proxy)");
+    return js;
+  }
+  return result;
 }
