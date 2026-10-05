@@ -1,6 +1,8 @@
 import { ctx, convert_url } from "../context.mjs";
 import * as loader from "../loader.mjs";
 
+let form_handler_installed = false;
+
 function build_form_data(form_element, submitter) {
   try {
     if (submitter) return new FormData(form_element, submitter);
@@ -61,20 +63,31 @@ function perform_submit(form_element, submitter) {
   loader.navigate(loader.frame_id, url, true, form_data);
 }
 
-export function rewrite_form(form_element) {
-  form_element.addEventListener("submit", (event) => {
-    if (event.defaultPrevented) return;
-    let method = (
-      (event.submitter && event.submitter.getAttribute("formmethod")) ||
-      form_element.getAttribute("method") ||
-      "get"
-    ).toLowerCase();
-    if (method === "dialog") return;
-    event.preventDefault();
-    event.stopImmediatePropagation();
-    perform_submit(form_element, event.submitter);
-  });
+function handle_submit(event) {
+  if (event.defaultPrevented) return;
 
+  let form_element = event.target;
+  if (!(form_element instanceof HTMLFormElement)) return;
+
+  let method = (
+    (event.submitter && event.submitter.getAttribute("formmethod")) ||
+    form_element.getAttribute("method") ||
+    "get"
+  ).toLowerCase();
+  if (method === "dialog") return;
+
+  event.preventDefault();
+  event.stopImmediatePropagation();
+  perform_submit(form_element, event.submitter);
+}
+
+export function install_form_handler() {
+  if (form_handler_installed) return;
+  form_handler_installed = true;
+  globalThis.addEventListener("submit", handle_submit);
+}
+
+export function rewrite_form(form_element) {
   form_element.submit = () => {
     perform_submit(form_element, null);
   };
