@@ -49,6 +49,39 @@ export function get_handler_keys(obj) {
   return keys;
 }
 
+function find_descriptor(obj, key) {
+  let proto = Object.getPrototypeOf(obj);
+  while (proto && proto !== Object.prototype) {
+    let descriptor = Object.getOwnPropertyDescriptor(proto, key);
+    if (descriptor) return descriptor;
+    proto = Object.getPrototypeOf(proto);
+  }
+  return undefined;
+}
+
+function assign_handler_value(obj, target, key, value) {
+  let descriptor = find_descriptor(obj, key);
+  if (!descriptor || "value" in descriptor) {
+    obj[key] = value;
+    return;
+  }
+  if (descriptor.set) {
+    descriptor.set.call(obj, value);
+    return;
+  }
+  if (descriptor.get && target === globalThis) {
+    try {
+      Object.defineProperty(target, key, {
+        value: value,
+        writable: true,
+        configurable: true,
+        enumerable: true
+      });
+    }
+    catch {}
+  }
+}
+
 export function create_obj_proxy(obj, ctx_vars, target) {
   let proxies = new Map();
 
@@ -65,7 +98,7 @@ export function create_obj_proxy(obj, ctx_vars, target) {
     },
     set: (_, key, value) => {
       if (ctx_vars.includes(key))
-        obj[key] = value;
+        assign_handler_value(obj, target, key, value);
       else
         target[key] = value;
       return true;
