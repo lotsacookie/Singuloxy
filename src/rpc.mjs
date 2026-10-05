@@ -4,6 +4,8 @@ export const rpc_requests = {};
 export let host = null;
 export let on_attach = () => {};
 
+const MIN_TRANSFER_BYTES = 64 * 1024;
+
 export class RPCTarget {
   constructor(target=null) {
     this.target = null;
@@ -74,6 +76,30 @@ function handle_procedure_reply(msg) {
   delete rpc_requests[msg.id];
 }
 
+function transfer_list(output) {
+  let value = output?.content?.value;
+  if (!(value instanceof Uint8Array)) return [];
+  let buffer = value.buffer;
+  if (!(buffer instanceof ArrayBuffer)) return [];
+  if (value.byteOffset !== 0 || value.byteLength !== buffer.byteLength) return [];
+  if (value.byteLength < MIN_TRANSFER_BYTES) return [];
+  return [buffer];
+}
+
+function send_reply(source, output) {
+  let transfer = transfer_list(output);
+  if (transfer.length === 0) {
+    source.postMessage(output, {targetOrigin: "*"});
+    return;
+  }
+  try {
+    source.postMessage(output, {targetOrigin: "*", transfer: transfer});
+  }
+  catch {
+    source.postMessage(output, {targetOrigin: "*"});
+  }
+}
+
 export async function message_listener(event, target) {
   let msg = event.data;
   let source = event.source || event.currentTarget;
@@ -83,7 +109,7 @@ export async function message_listener(event, target) {
     let output = await handle_procedure_call(msg);
     if (!source) return;
     if (output) {
-      source.postMessage(output, {targetOrigin: "*"});
+      send_reply(source, output);
     }
   }
   else if (msg.type === "reply") {
