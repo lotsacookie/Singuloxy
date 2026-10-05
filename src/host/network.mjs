@@ -20,9 +20,19 @@ const RECOVER_MIN_GAP_MS = 20 * 1000;
 const TRANSIENT_ERRORS = /error code (7|28|35|52|55|56)\b/;
 const TLS_ERROR = /error code 35\b/;
 const PRE_REQUEST_ERRORS = /error code (7|35)\b/;
+const PARTIAL_ERRORS = /error code (18|56)\b/;
 const TIMEOUT = Symbol("timeout");
 
+const SEGMENT_BYTES = 4 * 1024 * 1024;
+const SEGMENT_PARALLEL = 4;
+const SEGMENT_LOOKAHEAD = 5;
+const SEGMENT_RETRIES = 4;
+const SEGMENT_TIMEOUT_MS = 60 * 1000;
+const MAX_SEGMENT_REQUESTS = 12;
+const LARGE_FILE_PATTERN = /\.(zip|7z|rar|tar|pk3|pak|pck|wasm|data|bin|iso|mp4|webm|mkv|unityweb)([?#]|$)|\.part\d{2,}([?#]|$)/i;
+
 const streams = {};
+const segmented_hosts = new Set();
 
 let active_requests = 0;
 const request_queue = [];
@@ -38,6 +48,32 @@ let session_ready_resolve;
 const session_ready = new Promise((resolve) => {
   session_ready_resolve = resolve;
 });
+
+class Semaphore {
+  constructor(limit) {
+    this.limit = limit;
+    this.active = 0;
+    this.waiters = [];
+  }
+
+  acquire() {
+    if (this.active < this.limit) {
+      this.active++;
+      return Promise.resolve();
+    }
+    return new Promise((resolve) => {
+      this.waiters.push(resolve);
+    });
+  }
+
+  release() {
+    let next = this.waiters.shift();
+    if (next) next();
+    else this.active--;
+  }
+}
+
+const segment_semaphore = new Semaphore(MAX_SEGMENT_REQUESTS);
 
 let tracker_blocking = true;
 export function set_tracker_blocking(enabled) {
@@ -92,7 +128,7 @@ function blocked_payload(url) {
   catch {}
   let is_script = path.endsWith(".js");
   let mime = is_script ? "application/javascript" : "image/gif";
-  let body = is_script ? null : GIF_1X1;
+  let body = is_script ? null : GIF_1X1.slice();
 
   return {
     headers: [["content-type", mime]],
@@ -320,6 +356,159 @@ function merge_chunks(parts, size) {
   return merged;
 }
 
+function discard_response(response) {
+  try {
+    response?.body?.cancel?.().catch?.(() => {});
+  }
+  catch {}
+}
+
+function ranged(options, start, end) {
+  return {
+    ...(options || {}),
+    headers: {...(options?.headers || {}), Range: `bytes=${start}-${end}`}
+  };
+}
+
+function content_range_total(response) {
+  let match = /\/(\d+)\s*$/.exec(response.headers.get("content-range") || "");
+  return match ? Number(match[1]) : null;
+}
+
+function is_identity(response) {
+  let encoding = (response.headers.get("content-encoding") || "").toLowerCase();
+  return encoding === "" || encoding === "identity";
+}
+
+function usable_segmented(response) {
+  return response.status === 206 && content_range_total(response) !== null && is_identity(response);
+}
+
+async function download_segment(url, options, host, start, end, seed) {
+  let expected = end - start + 1;
+  let response = seed;
+  let last_error;
+
+  await segment_semaphore.acquire();
+  try {
+    for (let attempt = 0; attempt <= SEGMENT_RETRIES; attempt++) {
+      try {
+        if (!response) {
+          await acquire_host_slot(host);
+          await acquire_slot();
+          try {
+            response = await fetch_with_retry(url, ranged(options, start, end));
+          }
+          finally {
+            release_slot();
+            release_host_slot(host);
+          }
+          if (response.status !== 206) {
+            let status = response.status;
+            discard_response(response);
+            response = null;
+            throw new Error(`Request failed with error code 22: server did not honor the range request (status ${status})`);
+          }
+        }
+
+        let current = response;
+        response = null;
+        let bytes;
+        try {
+          bytes = new Uint8Array(await with_timeout(current.arrayBuffer(), SEGMENT_TIMEOUT_MS, url));
+        }
+        catch (e) {
+          discard_response(current);
+          throw e;
+        }
+        if (bytes.byteLength !== expected) {
+          throw new Error(`Request failed with error code 18: segment returned ${bytes.byteLength} of ${expected} bytes`);
+        }
+        return bytes;
+      }
+      catch (e) {
+        last_error = e;
+        if (attempt >= SEGMENT_RETRIES) break;
+        await sleep(Math.min(300 * 2 ** attempt, 3000) + Math.random() * 250);
+      }
+    }
+  }
+  finally {
+    segment_semaphore.release();
+  }
+
+  throw new Error(error_message(last_error));
+}
+
+function create_segmented_reader(url, options, host, total, first_response) {
+  let segment_count = Math.ceil(total / SEGMENT_BYTES);
+  let segments = new Map();
+  let next_start = 0;
+  let next_deliver = 0;
+  let in_flight = 0;
+  let cancelled = false;
+  let initial = first_response;
+
+  let launch = () => {
+    while (
+      !cancelled &&
+      next_start < segment_count &&
+      in_flight < SEGMENT_PARALLEL &&
+      next_start - next_deliver < SEGMENT_LOOKAHEAD
+    ) {
+      let index = next_start++;
+      let start = index * SEGMENT_BYTES;
+      let end = Math.min(start + SEGMENT_BYTES, total) - 1;
+      let seed = null;
+      if (index === 0) {
+        seed = initial;
+        initial = null;
+      }
+      in_flight++;
+      let promise = download_segment(url, options, host, start, end, seed).finally(() => {
+        in_flight--;
+        launch();
+      });
+      promise.catch(() => {});
+      segments.set(index, promise);
+    }
+  };
+
+  return {
+    read: async () => {
+      if (cancelled || next_deliver >= segment_count) {
+        return {done: true, value: undefined};
+      }
+      launch();
+      let index = next_deliver;
+      let promise = segments.get(index);
+      if (!promise) throw new Error("segment scheduling stalled");
+
+      let bytes;
+      try {
+        bytes = await promise;
+      }
+      catch (e) {
+        cancelled = true;
+        segments.clear();
+        throw e;
+      }
+      segments.delete(index);
+      next_deliver++;
+      launch();
+      return {done: false, value: bytes};
+    },
+    cancel: async () => {
+      cancelled = true;
+      segments.clear();
+      if (initial) {
+        discard_response(initial);
+        initial = null;
+      }
+    }
+  };
+}
+
 function end_stream(stream_id) {
   let stream = streams[stream_id];
   if (!stream) return;
@@ -456,13 +645,70 @@ rpc_handlers["fetch"] = async function(url, options) {
   await acquire_slot();
 
   try {
-    let response;
-    try {
-      response = await fetch_with_retry(url, options);
+    let method = String(options?.method || "GET").toUpperCase();
+    let can_segment = (
+      method === "GET" &&
+      !options?.body &&
+      !has_header(options?.headers, "range")
+    );
+    let response = null;
+    let segmented = false;
+
+    if (can_segment && (segmented_hosts.has(host) || LARGE_FILE_PATTERN.test(url))) {
+      try {
+        let attempt = await fetch_with_retry(url, ranged(options, 0, SEGMENT_BYTES - 1));
+        if (attempt.status === 206) {
+          if (usable_segmented(attempt)) {
+            response = attempt;
+            segmented = true;
+          }
+          else {
+            discard_response(attempt);
+          }
+        }
+        else if (attempt.status === 416) {
+          discard_response(attempt);
+        }
+        else {
+          response = attempt;
+        }
+      }
+      catch (e) {
+        console.warn("sandstone host: ranged start failed, using a normal request:", url, error_message(e));
+      }
     }
-    catch (e) {
-      console.error("sandstone host: libcurl fetch failed:", url, e);
-      throw new Error(error_message(e));
+
+    if (!response) {
+      try {
+        response = await fetch_with_retry(url, options);
+      }
+      catch (e) {
+        let recovered = false;
+        if (can_segment && PARTIAL_ERRORS.test(error_message(e))) {
+          segmented_hosts.add(host);
+          console.warn("sandstone host: transfer cut off, switching to segmented download:", url, error_message(e));
+          try {
+            let attempt = await fetch_with_retry(url, ranged(options, 0, SEGMENT_BYTES - 1));
+            if (usable_segmented(attempt)) {
+              response = attempt;
+              segmented = true;
+              recovered = true;
+            }
+            else if (attempt.status === 200) {
+              response = attempt;
+              recovered = true;
+            }
+            else {
+              discard_response(attempt);
+            }
+          }
+          catch {}
+        }
+        if (!recovered) {
+          console.error("sandstone host: libcurl fetch failed:", url, e);
+          throw new Error(error_message(e));
+        }
+      }
     }
 
     let keys = ["ok", "redirected", "status", "statusText", "type", "url", "raw_headers"];
@@ -480,7 +726,35 @@ rpc_handlers["fetch"] = async function(url, options) {
     }
     payload.mime_type = (response.headers.get("content-type") || "").split(";")[0].trim();
 
-    let method = String(options?.method || "GET").toUpperCase();
+    if (segmented) {
+      let total = content_range_total(response);
+      payload.items.ok = true;
+      payload.items.status = 200;
+      payload.items.statusText = "OK";
+      payload.headers = payload.headers.filter(([key]) => {
+        let name = String(key).toLowerCase();
+        return name !== "content-range" && name !== "content-length";
+      });
+      payload.headers.push(["content-length", String(total)]);
+
+      let stream_id = Math.random() + "";
+      streams[stream_id] = {
+        reader: create_segmented_reader(url, options ? {...options} : undefined, host, total, response),
+        pending: null,
+        finished: false,
+        error: null,
+        received: 0,
+        resumes: 0,
+        url: url,
+        options: options ? {...options} : undefined,
+        touched: Date.now(),
+        can_resume: false
+      };
+      payload.stream_id = stream_id;
+      enforce_stream_cap();
+      return payload;
+    }
+
     let encoding = (response.headers.get("content-encoding") || "").toLowerCase();
     let ranges = (response.headers.get("accept-ranges") || "").toLowerCase();
 
