@@ -41,7 +41,7 @@ export class RPCTarget {
   }
 }
 
-async function handle_procedure_call(msg) {
+async function handle_procedure_call(msg, source) {
   if (!rpc_handlers[msg.procedure]) {
     return;
   }
@@ -49,7 +49,7 @@ async function handle_procedure_call(msg) {
   let output;
   try {
     output = {
-      value: await rpc_handlers[msg.procedure](...msg.arguments),
+      value: await rpc_handlers[msg.procedure].apply({source: source}, msg.arguments),
       success: true
     };
   }
@@ -106,7 +106,7 @@ export async function message_listener(event, target) {
   if (!msg || typeof msg.type === "undefined") return;
 
   if (msg.type === "procedure") {
-    let output = await handle_procedure_call(msg);
+    let output = await handle_procedure_call(msg, source);
     if (!source) return;
     if (output) {
       send_reply(source, output);
