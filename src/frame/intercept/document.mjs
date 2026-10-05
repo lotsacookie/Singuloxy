@@ -20,6 +20,7 @@ class CustomDocument {
   get URL() {return ctx.location.href}
   get baseURI() {return ctx.location.href}
   get documentURI() {return ctx.location.href}
+  get defaultView() {return ctx.window}
   get currentScript() {return internal.currentScript}
   set currentScript(value) {internal.currentScript = value}
   get activeElement() {return this.__target__.activeElement || this.__target__.body}
