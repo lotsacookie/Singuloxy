@@ -15,8 +15,8 @@ const COALESCE_BYTES = 2 * 1024 * 1024;
 const COALESCE_WAIT_MS = 8;
 const STREAM_IDLE_MS = 2 * 60 * 1000;
 const MAX_OPEN_STREAMS = 48;
-const RECOVER_AFTER_FAILURES = 6;
-const RECOVER_MIN_GAP_MS = 15 * 1000;
+const RECOVER_AFTER_FAILURES = 4;
+const RECOVER_MIN_GAP_MS = 20 * 1000;
 const TRANSIENT_ERRORS = /error code (7|28|35|52|55|56)\b/;
 const TLS_ERROR = /error code 35\b/;
 const PRE_REQUEST_ERRORS = /error code (7|35)\b/;
@@ -27,7 +27,9 @@ const streams = {};
 let active_requests = 0;
 const request_queue = [];
 
-let tls_failure_streak = 0;
+const host_tls_failures = new Map();
+let wisp_pool = [];
+let wisp_index = 0;
 let last_recovery = 0;
 let recovering = null;
 let ws_url = null;
@@ -123,6 +125,17 @@ export function set_websocket(url) {
   libcurl.set_websocket(url);
 }
 
+export function set_wisp_pool(urls) {
+  wisp_pool = (Array.isArray(urls) ? urls : []).filter((url) => typeof url === "string" && url);
+  wisp_index = Math.max(0, wisp_pool.indexOf(ws_url));
+}
+
+function next_wisp() {
+  if (wisp_pool.length < 2) return ws_url;
+  wisp_index = (wisp_index + 1) % wisp_pool.length;
+  return wisp_pool[wisp_index];
+}
+
 function make_session() {
   try {
     return new libcurl.HTTPSession({enable_cookies: true});
@@ -137,12 +150,16 @@ function recover_session() {
   if (recovering) return recovering;
   if (Date.now() - last_recovery < RECOVER_MIN_GAP_MS) return null;
   last_recovery = Date.now();
-  tls_failure_streak = 0;
+  host_tls_failures.clear();
 
   recovering = (async () => {
     console.warn("sandstone host: repeated TLS failures, resetting wisp connection and libcurl session");
     try {
-      if (ws_url) libcurl.set_websocket(ws_url);
+      let target = next_wisp() || ws_url;
+      if (target) {
+        console.warn("sandstone host: switching wisp server to", target);
+        libcurl.set_websocket(target);
+      }
     }
     catch (e) {
       console.warn("sandstone host: reconnect failed:", error_message(e));
@@ -157,14 +174,16 @@ function recover_session() {
   return recovering;
 }
 
-function note_success() {
-  tls_failure_streak = 0;
+function note_success(url) {
+  host_tls_failures.delete(host_of(url));
 }
 
-function note_failure(error) {
+function note_failure(error, url) {
   if (!TLS_ERROR.test(error_message(error))) return;
-  tls_failure_streak++;
-  if (tls_failure_streak >= RECOVER_AFTER_FAILURES) recover_session();
+  let host = host_of(url);
+  let count = (host_tls_failures.get(host) || 0) + 1;
+  host_tls_failures.set(host, count);
+  if (count >= RECOVER_AFTER_FAILURES) recover_session();
 }
 
 function acquire_slot() {
@@ -270,11 +289,11 @@ async function fetch_with_retry(url, options) {
         REQUEST_TIMEOUT_MS,
         url
       );
-      note_success();
+      note_success(url);
       return response;
     }
     catch (e) {
-      note_failure(e);
+      note_failure(e, url);
       let message = error_message(e);
       let retryable = can_retry ? is_transient(e) : PRE_REQUEST_ERRORS.test(message);
       let limit = TLS_ERROR.test(message) ? MAX_TLS_RETRIES : MAX_RETRIES;
