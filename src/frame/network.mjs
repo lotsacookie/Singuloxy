@@ -38,6 +38,60 @@ function is_page_origin(url_obj) {
   return url_obj.origin === origin;
 }
 
+function normalize_headers(headers) {
+  if (!headers) return {};
+  if (headers instanceof Headers) return Object.fromEntries(headers);
+  if (Array.isArray(headers)) return Object.fromEntries(headers);
+  return {...headers};
+}
+
+function has_header(headers, name) {
+  return Object.keys(headers).some((key) => key.toLowerCase() === name);
+}
+
+function referer_for(url_obj) {
+  try {
+    let page = new URL(ctx.location?.href || loader.url);
+    if (page.protocol !== "http:" && page.protocol !== "https:") return null;
+    if (page.protocol === "https:" && url_obj.protocol === "http:") return null;
+    if (page.origin === url_obj.origin) {
+      page.hash = "";
+      page.username = "";
+      page.password = "";
+      return page.href;
+    }
+    return page.origin + "/";
+  }
+  catch {
+    return null;
+  }
+}
+
+function with_browser_headers(url_obj, options) {
+  let from_page_code = options !== undefined && options !== null;
+  let headers = normalize_headers(options?.headers);
+  let method = String(options?.method || "GET").toUpperCase();
+
+  let no_referrer = options?.referrerPolicy === "no-referrer" || options?.referrer === "";
+  if (!no_referrer && !has_header(headers, "referer")) {
+    let referer = referer_for(url_obj);
+    if (referer) headers["Referer"] = referer;
+  }
+
+  if (from_page_code && options.mode !== "no-cors" && !has_header(headers, "origin")) {
+    let origin = page_origin();
+    let cross_origin = origin !== null && url_obj.origin !== origin;
+    if (origin && (cross_origin || (method !== "GET" && method !== "HEAD")))
+      headers["Origin"] = origin;
+  }
+
+  if (!has_header(headers, "user-agent") && typeof navigator !== "undefined" && navigator.userAgent) {
+    headers["User-Agent"] = navigator.userAgent;
+  }
+
+  return {...(options || {}), headers: headers};
+}
+
 function store_response_cookies(url_obj, fetch_data) {
   try {
     if (!is_page_origin(url_obj)) return;
@@ -93,7 +147,7 @@ export async function fetch(url, options) {
 
   let fetch_data;
   try {
-    fetch_data = await rpc_fetch(url.href, options);
+    fetch_data = await rpc_fetch(url.href, with_browser_headers(url, options));
   }
   catch (e) {
     let reason = e?.message ?? String(e);
