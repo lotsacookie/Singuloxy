@@ -1,6 +1,10 @@
 import { ctx, convert_url, intercept_property, proxy_function } from "../context.mjs";
 import * as network from "../network.mjs";
 
+const PICTURE_IMAGE_TYPES = new Set([
+  "image/webp", "image/avif", "image/jpeg", "image/png", "image/gif", "image/svg+xml", "image/apng"
+]);
+
 function resolve_http_url(value) {
   if (!value) return null;
   let text = String(value);
@@ -33,6 +37,27 @@ function pick_srcset(srcset) {
   let fitting = candidates.filter((candidate) => candidate.weight <= limit);
   let best = fitting.length ? fitting[fitting.length - 1] : candidates[0];
   return best.url;
+}
+
+function pick_picture_source(image) {
+  let picture = image.parentElement;
+  if (!(picture instanceof HTMLPictureElement)) return null;
+  for (let source of picture.querySelectorAll("source")) {
+    let stored = source.getAttribute("__srcset");
+    if (!stored) continue;
+    let type = (source.getAttribute("type") || "").trim().toLowerCase();
+    if (type && !PICTURE_IMAGE_TYPES.has(type)) continue;
+    let media = source.getAttribute("media");
+    if (media) {
+      try {
+        if (!matchMedia(media).matches) continue;
+      }
+      catch {}
+    }
+    let best = pick_srcset(stored);
+    if (best) return best;
+  }
+  return null;
 }
 
 export function rewrite_media(media_element) {
@@ -114,11 +139,17 @@ export function rewrite_media(media_element) {
   
   let srcset = media_element.getAttribute("srcset");
   if (srcset) {
+    media_element.setAttribute("__srcset", srcset);
     media_element.setAttribute("srcset", "");
     if (media_element instanceof HTMLImageElement && !media_src) {
       let best = pick_srcset(srcset);
       if (best) media_src = best;
     }
+  }
+
+  if (!media_src && media_element instanceof HTMLImageElement) {
+    let from_picture = pick_picture_source(media_element);
+    if (from_picture) media_src = from_picture;
   }
 
   if (!media_src || media_src.startsWith("data:") || media_src.startsWith("blob:")) {
