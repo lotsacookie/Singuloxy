@@ -4,7 +4,7 @@ import * as network from "./network.mjs";
 import * as parser from "./parser.mjs";
 
 import { update_ctx, run_script, run_script_safe, ctx, convert_url, get_cookie_jar } from "./context.mjs";
-import { pending_scripts } from "./rewrite/script.mjs";
+import { pending_scripts, script_state, execute_script } from "./rewrite/script.mjs";
 import { pending_modules } from "./rewrite/module.mjs";
 import { install_form_handler } from "./rewrite/form.mjs";
 
@@ -25,19 +25,7 @@ export let default_settings = {};
 const MODULE_TIMEOUT_MS = 15000;
 
 function eval_script(script_element, script_text) {
-  ctx.document.currentScript = script_element;
-  let script = document.createElement("script");
-  script.__rewritten__ = true;
-  try {
-    let rewritten_js = parser.rewrite_js(script_text);
-    script.innerHTML = rewritten_js;
-    document.body.append(script);
-  }
-  catch (e) {
-    console.error(e);
-  }
-  script.remove();
-  ctx.document.currentScript = null;
+  execute_script(script_element, script_text);
   script_element.dispatchEvent(new Event("load"));
 }
 
@@ -59,7 +47,7 @@ function evaluate_scripts() {
   }
 }
 
-function eval_module(script_element, blob_url) {
+export function eval_module(script_element, blob_url) {
   return new Promise((resolve) => {
     let script = document.createElement("script");
     script.__rewritten__ = true;
@@ -202,6 +190,8 @@ async function load_html(options) {
   let html = parser.parseFromString(options.html, "text/html");  
   
   await rewrite.element(html.documentElement);
+
+  script_state.phase = "running";
 
   let id_elements = html.querySelectorAll("*[id]");
   let ctx_proto = Object.getPrototypeOf(ctx);
