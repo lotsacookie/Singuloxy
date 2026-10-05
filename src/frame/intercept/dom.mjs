@@ -1,7 +1,10 @@
 import * as rewrite from "../rewrite/index.mjs";
-import { proxy_function } from "../context.mjs";
+import { parse_css } from "../rewrite/css.mjs";
+import { ctx, proxy_function } from "../context.mjs";
 
 const MEDIA_TAGS = new Set(["img", "audio", "video", "source"]);
+const MEDIA_SELECTOR = "img, source, video, audio, input[type='image']";
+const SRC_TAGS = new Set(["IMG", "SOURCE"]);
 
 function handle_node(node) {
   if (!node) return;
@@ -26,6 +29,27 @@ function handle_all(nodes) {
   }
 }
 
+function rewrite_media_only(node) {
+  if (!node) return;
+  try {
+    let list = [];
+    if (node instanceof Element) {
+      if (node.matches(MEDIA_SELECTOR)) list.push(node);
+      list.push(...node.querySelectorAll(MEDIA_SELECTOR));
+    }
+    else if (node instanceof DocumentFragment) {
+      list.push(...node.querySelectorAll(MEDIA_SELECTOR));
+    }
+    for (let element of list) {
+      if (element.__media_hooked__) continue;
+      rewrite.media(element);
+    }
+  }
+  catch (e) {
+    console.error(e);
+  }
+}
+
 function hook_first_arg(target, key) {
   proxy_function(target, key, (func, this_arg, args) => {
     handle_node(args[0]);
@@ -40,10 +64,11 @@ function hook_all_args(target, key) {
   });
 }
 
-function hook_html_setter(name) {
-  let descriptor = Object.getOwnPropertyDescriptor(Element.prototype, name);
+function hook_html_setter(proto, name) {
+  if (!proto) return;
+  let descriptor = Object.getOwnPropertyDescriptor(proto, name);
   if (!descriptor || !descriptor.set) return;
-  Object.defineProperty(Element.prototype, name, {
+  Object.defineProperty(proto, name, {
     configurable: true,
     enumerable: descriptor.enumerable,
     get: descriptor.get,
@@ -55,10 +80,153 @@ function hook_html_setter(name) {
   });
 }
 
+function hook_media_src_setter(proto) {
+  if (!proto) return;
+  let descriptor = Object.getOwnPropertyDescriptor(proto, "src");
+  if (!descriptor || !descriptor.set) return;
+  Object.defineProperty(proto, "src", {
+    configurable: true,
+    enumerable: descriptor.enumerable,
+    get: descriptor.get,
+    set: function(value) {
+      if (!this.__media_hooked__) {
+        try {
+          rewrite.media(this);
+        }
+        catch (e) {
+          console.error(e);
+        }
+        if (Object.prototype.hasOwnProperty.call(this, "src")) {
+          this.src = value;
+          return;
+        }
+      }
+      descriptor.set.call(this, value);
+    }
+  });
+}
+
+const REWRITABLE_URL = /url\(\s*(?!["']?(?:data:|blob:|about:|#))/i;
+const STYLE_PROPS = [
+  "backgroundImage", "background", "listStyleImage", "listStyle",
+  "borderImage", "borderImageSource", "maskImage", "webkitMaskImage",
+  "mask", "webkitMask", "cursor", "content"
+];
+const pending_css = new WeakMap();
+
+function needs_css_rewrite(text) {
+  return typeof text === "string" && REWRITABLE_URL.test(text);
+}
+
+function apply_css(style, key, text, commit) {
+  let result;
+  try {
+    result = parse_css(text, ctx.location.href);
+  }
+  catch (e) {
+    console.error("sandstone: style rewrite failed", e);
+    commit(text);
+    return;
+  }
+  if (typeof result === "string") {
+    commit(result);
+    return;
+  }
+
+  let map = pending_css.get(style);
+  if (!map) {
+    map = new Map();
+    pending_css.set(style, map);
+  }
+  let id = (map.get(key) || 0) + 1;
+  map.set(key, id);
+
+  result.then((value) => {
+    if (map.get(key) === id) commit(value);
+  }, (e) => {
+    console.error("sandstone: style rewrite failed", e);
+  });
+}
+
+function hook_style() {
+  if (typeof CSSStyleDeclaration === "undefined") return;
+  let protos = [CSSStyleDeclaration.prototype];
+  if (typeof CSS2Properties !== "undefined") protos.push(CSS2Properties.prototype);
+
+  for (let proto of protos) {
+    for (let name of STYLE_PROPS.concat(["cssText"])) {
+      let descriptor = Object.getOwnPropertyDescriptor(proto, name);
+      if (!descriptor || !descriptor.set) continue;
+      Object.defineProperty(proto, name, {
+        configurable: true,
+        enumerable: descriptor.enumerable,
+        get: descriptor.get,
+        set: function(value) {
+          let text = value === null || value === undefined ? "" : String(value);
+          if (!needs_css_rewrite(text)) {
+            descriptor.set.call(this, value);
+            return;
+          }
+          apply_css(this, name, text, (rewritten) => descriptor.set.call(this, rewritten));
+        }
+      });
+    }
+  }
+
+  proxy_function(CSSStyleDeclaration.prototype, "setProperty", (func, this_arg, args) => {
+    let text = args[1] === null || args[1] === undefined ? "" : String(args[1]);
+    if (!needs_css_rewrite(text)) return Reflect.apply(func, this_arg, args);
+    apply_css(this_arg, "p:" + args[0], text, (rewritten) => {
+      Reflect.apply(func, this_arg, [args[0], rewritten, args[2]]);
+    });
+  });
+}
+
+function start_safety_net() {
+  if (typeof MutationObserver === "undefined" || typeof document === "undefined") return;
+
+  let started = false;
+  let begin = () => {
+    if (started) return;
+    let root = document.documentElement;
+    if (!root) return;
+    started = true;
+
+    let observer = new MutationObserver((records) => {
+      for (let record of records) {
+        if (record.type === "childList") {
+          for (let node of record.addedNodes) {
+            if (node.nodeType === 1) rewrite_media_only(node);
+          }
+        }
+        else if (record.type === "attributes" && record.target.nodeType === 1) {
+          let target = record.target;
+          if (!target.__media_hooked__ && target.matches(MEDIA_SELECTOR)) rewrite_media_only(target);
+        }
+      }
+    });
+    observer.observe(root, {
+      childList: true,
+      subtree: true,
+      attributes: true,
+      attributeFilter: ["src", "srcset"]
+    });
+  };
+
+  begin();
+  if (!started) document.addEventListener("DOMContentLoaded", begin, {once: true});
+}
+
 if (typeof Node !== "undefined") {
   hook_first_arg(Node.prototype, "appendChild");
   hook_first_arg(Node.prototype, "insertBefore");
   hook_first_arg(Node.prototype, "replaceChild");
+
+  proxy_function(Node.prototype, "cloneNode", (func, this_arg, args) => {
+    let clone = Reflect.apply(func, this_arg, args);
+    rewrite_media_only(clone);
+    return clone;
+  });
 }
 
 if (typeof Element !== "undefined") {
@@ -76,14 +244,50 @@ if (typeof Element !== "undefined") {
     handle_node(scope);
     return result;
   });
-  hook_html_setter("innerHTML");
-  hook_html_setter("outerHTML");
+  hook_html_setter(Element.prototype, "innerHTML");
+  hook_html_setter(Element.prototype, "outerHTML");
+
+  proxy_function(Element.prototype, "setAttribute", (func, this_arg, args) => {
+    try {
+      let name = String(args[0]).toLowerCase();
+      if ((name === "src" || name === "srcset") && SRC_TAGS.has(this_arg.tagName) && !this_arg.__media_hooked__) {
+        rewrite.media(this_arg);
+        this_arg.setAttribute(args[0], args[1]);
+        return;
+      }
+      if (name === "style") {
+        let text = args[1] === null || args[1] === undefined ? "" : String(args[1]);
+        if (needs_css_rewrite(text)) {
+          apply_css(this_arg, "attr:style", text, (rewritten) => {
+            Reflect.apply(func, this_arg, [args[0], rewritten]);
+          });
+          return;
+        }
+      }
+    }
+    catch (e) {
+      console.error(e);
+    }
+    return Reflect.apply(func, this_arg, args);
+  });
+}
+
+if (typeof ShadowRoot !== "undefined") {
+  hook_html_setter(ShadowRoot.prototype, "innerHTML");
 }
 
 if (typeof DocumentFragment !== "undefined") {
   for (let key of ["append", "prepend", "replaceChildren"]) {
     hook_all_args(DocumentFragment.prototype, key);
   }
+}
+
+if (typeof Range !== "undefined") {
+  proxy_function(Range.prototype, "createContextualFragment", (func, this_arg, args) => {
+    let fragment = Reflect.apply(func, this_arg, args);
+    rewrite_media_only(fragment);
+    return fragment;
+  });
 }
 
 if (typeof Document !== "undefined") {
@@ -99,7 +303,32 @@ if (typeof Document !== "undefined") {
     }
     return element;
   });
+
+  proxy_function(Document.prototype, "createElementNS", (func, this_arg, args) => {
+    let element = Reflect.apply(func, this_arg, args);
+    try {
+      if (args[0] === "http://www.w3.org/1999/xhtml" && MEDIA_TAGS.has(String(args[1]).toLowerCase())) {
+        rewrite.element(element);
+      }
+    }
+    catch (e) {
+      console.error(e);
+    }
+    return element;
+  });
+
+  proxy_function(Document.prototype, "importNode", (func, this_arg, args) => {
+    let node = Reflect.apply(func, this_arg, args);
+    rewrite_media_only(node);
+    return node;
+  });
 }
+
+if (typeof HTMLImageElement !== "undefined") hook_media_src_setter(HTMLImageElement.prototype);
+if (typeof HTMLSourceElement !== "undefined") hook_media_src_setter(HTMLSourceElement.prototype);
+
+hook_style();
+start_safety_net();
 
 for (let name of ["Image", "Audio"]) {
   if (globalThis[name]) {
