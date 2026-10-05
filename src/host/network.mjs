@@ -16,9 +16,11 @@ const COALESCE_WAIT_MS = 8;
 const STREAM_IDLE_MS = 2 * 60 * 1000;
 const MAX_OPEN_STREAMS = 48;
 const RECOVER_AFTER_FAILURES = 4;
-const RECOVER_MIN_GAP_MS = 20 * 1000;
+const RECOVER_AFTER_CONSECUTIVE = 4;
+const RECOVER_MIN_GAP_MS = 10 * 1000;
 const TRANSIENT_ERRORS = /error code (7|28|35|52|55|56)\b/;
 const TLS_ERROR = /error code 35\b/;
+const CONNECTION_ERRORS = /error code (7|35)\b/;
 const PRE_REQUEST_ERRORS = /error code (7|35)\b/;
 const PARTIAL_ERRORS = /error code (18|56)\b/;
 const TIMEOUT = Symbol("timeout");
@@ -38,6 +40,7 @@ let active_requests = 0;
 const request_queue = [];
 
 const host_tls_failures = new Map();
+let consecutive_failures = 0;
 let wisp_pool = [];
 let wisp_index = 0;
 let last_recovery = 0;
@@ -120,7 +123,7 @@ function is_blocked(url) {
   }
 }
 
-function blocked_payload(url) {
+function blocked_payload(url, owner) {
   let path = "";
   try {
     path = new URL(url).pathname.toLowerCase();
@@ -142,7 +145,7 @@ function blocked_payload(url) {
       raw_headers: []
     },
     mime_type: mime,
-    stream_id: body ? register_buffer_stream(body, url) : null
+    stream_id: body ? register_buffer_stream(body, url, owner) : null
   };
 }
 
@@ -163,11 +166,20 @@ export function set_websocket(url) {
 
 export function set_wisp_pool(urls) {
   wisp_pool = (Array.isArray(urls) ? urls : []).filter((url) => typeof url === "string" && url);
-  wisp_index = Math.max(0, wisp_pool.indexOf(ws_url));
+  wisp_index = Math.max(0, wisp_pool.indexOf(current_ws_url()));
+}
+
+function current_ws_url() {
+  if (ws_url) return ws_url;
+  for (let key of ["websocket_url", "wisp_url", "websocket"]) {
+    let value = libcurl[key];
+    if (typeof value === "string" && value) return value;
+  }
+  return null;
 }
 
 function next_wisp() {
-  if (wisp_pool.length < 2) return ws_url;
+  if (wisp_pool.length < 2) return current_ws_url();
   wisp_index = (wisp_index + 1) % wisp_pool.length;
   return wisp_pool[wisp_index];
 }
@@ -182,18 +194,19 @@ function make_session() {
   }
 }
 
-function recover_session() {
+function recover_session(force = false) {
   if (recovering) return recovering;
-  if (Date.now() - last_recovery < RECOVER_MIN_GAP_MS) return null;
+  if (!force && Date.now() - last_recovery < RECOVER_MIN_GAP_MS) return null;
   last_recovery = Date.now();
   host_tls_failures.clear();
+  consecutive_failures = 0;
 
   recovering = (async () => {
-    console.warn("sandstone host: repeated TLS failures, resetting wisp connection and libcurl session");
+    console.warn("sandstone host: connection problems detected, resetting the wisp connection and libcurl session");
     try {
-      let target = next_wisp() || ws_url;
+      let target = next_wisp() || current_ws_url();
       if (target) {
-        console.warn("sandstone host: switching wisp server to", target);
+        console.warn("sandstone host: reconnecting wisp server", target);
         libcurl.set_websocket(target);
       }
     }
@@ -211,11 +224,19 @@ function recover_session() {
 }
 
 function note_success(url) {
+  consecutive_failures = 0;
   host_tls_failures.delete(host_of(url));
 }
 
 function note_failure(error, url) {
-  if (!TLS_ERROR.test(error_message(error))) return;
+  let message = error_message(error);
+
+  if (CONNECTION_ERRORS.test(message)) {
+    consecutive_failures++;
+    if (consecutive_failures >= RECOVER_AFTER_CONSECUTIVE) recover_session();
+  }
+
+  if (!TLS_ERROR.test(message)) return;
   let host = host_of(url);
   let count = (host_tls_failures.get(host) || 0) + 1;
   host_tls_failures.set(host, count);
@@ -336,6 +357,23 @@ async function fetch_with_retry(url, options) {
       if (!retryable || attempt >= limit) throw e;
       attempt++;
       await sleep(Math.min(400 * 2 ** (attempt - 1), 4000) + Math.random() * 300);
+    }
+  }
+}
+
+export async function fetch_page(url, options) {
+  if (!session) await session_ready;
+  let attempt = 0;
+
+  while (true) {
+    try {
+      return await fetch_with_retry(url, options);
+    }
+    catch (e) {
+      if (attempt >= 2 || !CONNECTION_ERRORS.test(error_message(e))) throw e;
+      attempt++;
+      console.warn("sandstone host: page request failed, resetting the connection and retrying:", url, error_message(e));
+      await recover_session(true);
     }
   }
 }
@@ -519,6 +557,13 @@ function end_stream(stream_id) {
   catch {}
 }
 
+export function end_streams_for(owners) {
+  if (!Array.isArray(owners) || owners.length === 0) return;
+  for (let [stream_id, stream] of Object.entries(streams)) {
+    if (stream.owner && owners.includes(stream.owner)) end_stream(stream_id);
+  }
+}
+
 function enforce_stream_cap() {
   let ids = Object.keys(streams);
   if (ids.length <= MAX_OPEN_STREAMS) return;
@@ -532,7 +577,7 @@ function enforce_stream_cap() {
   }
 }
 
-function register_buffer_stream(buffer, url) {
+function register_buffer_stream(buffer, url, owner = null) {
   let stream_id = Math.random() + "";
   let delivered = false;
   streams[stream_id] = {
@@ -544,6 +589,7 @@ function register_buffer_stream(buffer, url) {
       },
       cancel: async () => {}
     },
+    owner: owner,
     pending: null,
     finished: false,
     error: null,
@@ -637,7 +683,9 @@ function safe_close(ws_info) {
 }
 
 rpc_handlers["fetch"] = async function(url, options) {
-  if (tracker_blocking && is_blocked(url)) return blocked_payload(url);
+  let owner = this?.source ?? null;
+
+  if (tracker_blocking && is_blocked(url)) return blocked_payload(url, owner);
 
   if (!session) await session_ready;
   let host = host_of(url);
@@ -740,6 +788,7 @@ rpc_handlers["fetch"] = async function(url, options) {
       let stream_id = Math.random() + "";
       streams[stream_id] = {
         reader: create_segmented_reader(url, options ? {...options} : undefined, host, total, response),
+        owner: owner,
         pending: null,
         finished: false,
         error: null,
@@ -777,6 +826,7 @@ rpc_handlers["fetch"] = async function(url, options) {
       let stream_id = Math.random() + "";
       streams[stream_id] = {
         reader: response.body.getReader(),
+        owner: owner,
         pending: null,
         finished: false,
         error: null,
@@ -798,7 +848,7 @@ rpc_handlers["fetch"] = async function(url, options) {
     else {
       let blob = await response.blob();
       let buffer = new Uint8Array(await blob.arrayBuffer());
-      payload.stream_id = register_buffer_stream(buffer, url);
+      payload.stream_id = register_buffer_stream(buffer, url, owner);
     }
 
     enforce_stream_cap();
