@@ -6,6 +6,7 @@ import * as parser from "./parser.mjs";
 import { update_ctx, run_script, run_script_safe, ctx, convert_url, get_cookie_jar } from "./context.mjs";
 import { pending_scripts } from "./rewrite/script.mjs";
 import { pending_modules } from "./rewrite/module.mjs";
+import { install_form_handler } from "./rewrite/form.mjs";
 
 export const navigate = rpc.create_rpc_wrapper(rpc.host, "navigate");
 export const local_storage = rpc.create_rpc_wrapper(rpc.host, "local_storage");
@@ -101,6 +102,69 @@ function get_frame_html() {
   frame_html = doctype + html;
 }
 
+function handle_click(event) {
+  if (event.defaultPrevented) return;
+
+  let element = event.target;
+  while (element && !(element instanceof HTMLAnchorElement)) {
+    element = element.parentElement;
+  }
+  if (!element || !element.hasAttribute("href")) return;
+
+  let href = element.getAttribute("href").trim();
+
+  if (href.toLowerCase().startsWith("javascript:")) {
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    let original_js = href.substring("javascript:".length);
+    try {
+      original_js = decodeURIComponent(original_js);
+    }
+    catch {}
+    run_script_safe(original_js);
+    return;
+  }
+
+  let current_url;
+  let target_url;
+  try {
+    current_url = new URL(ctx.location.href);
+    if (href.startsWith("#"))
+      target_url = new URL(href, current_url);
+    else if (/^https?:/i.test(element.href))
+      target_url = new URL(element.href);
+    else
+      target_url = new URL(href, current_url);
+  }
+  catch {
+    return;
+  }
+
+  if (target_url.protocol !== "http:" && target_url.protocol !== "https:") return;
+
+  event.preventDefault();
+  event.stopImmediatePropagation();
+
+  let same_document = (
+    target_url.origin === current_url.origin &&
+    target_url.pathname === current_url.pathname &&
+    target_url.search === current_url.search
+  );
+
+  if (same_document && href.includes("#")) {
+    if (target_url.hash === "" || target_url.hash === "#")
+      window.scrollTo(0, 0);
+    ctx.location.assign(target_url.href);
+    return;
+  }
+
+  navigate(frame_id, target_url.href);
+}
+
+function install_click_handler() {
+  globalThis.addEventListener("click", handle_click);
+}
+
 async function load_html(options) {
   version = options.version;
   is_iframe = options.is_iframe || false;
@@ -139,34 +203,6 @@ async function load_html(options) {
   
   await rewrite.element(html.documentElement);
 
-  document.addEventListener("click", (event) => {
-    if (event.defaultPrevented) return;
-    let element = event.target;
-    while (element && !(element instanceof HTMLAnchorElement)) {
-      element = element.parentElement;
-    }
-    if (!element) return;
-
-    event.preventDefault();
-    event.stopImmediatePropagation();
-
-    if (element.href.startsWith("javascript:")) {
-      let original_js = element.href.replace("javascript:", "");
-      run_script_safe(original_js)
-    }
-    else {
-      let original_href = convert_url(element.href, ctx.location.href);
-      let url = new URL(original_href);
-      if (url.pathname === location.pathname) {
-        let element_id = url.hash.substring(1);
-        let element = document.getElementById(element_id);
-        if (element) element.scrollIntoView({behavior: "instant"});
-        return;
-      }
-      navigate(frame_id, original_href);  
-    }
-  });
-
   let id_elements = html.querySelectorAll("*[id]");
   let ctx_proto = Object.getPrototypeOf(ctx);
   for (let i = 0; i < id_elements.length; i++) {
@@ -187,6 +223,9 @@ async function load_html(options) {
   ctx.document.dispatchEvent(new Event("readystatechange"));
   ctx.document.dispatchEvent(new Event("load"));
   ctx.window.dispatchEvent(new Event("load"));
+
+  install_click_handler();
+  install_form_handler();
 }
 
 async function get_favicon() {
