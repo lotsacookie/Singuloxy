@@ -5,13 +5,18 @@ import { libcurl } from "libcurl.js/bundled";
 export const ws_connections = {};
 export let session = null;
 
-const MAX_CONCURRENT_REQUESTS = 6;
-const MAX_RETRIES = 2;
+const MAX_CONCURRENT_REQUESTS = 16;
+const MAX_RETRIES = 3;
 const MAX_RESUMES = 5;
+const REQUEST_TIMEOUT_MS = 45 * 1000;
 const COALESCE_BYTES = 2 * 1024 * 1024;
 const COALESCE_WAIT_MS = 8;
-const STREAM_IDLE_MS = 5 * 60 * 1000;
+const STREAM_IDLE_MS = 2 * 60 * 1000;
+const MAX_OPEN_STREAMS = 48;
+const RECOVER_AFTER_FAILURES = 6;
+const RECOVER_MIN_GAP_MS = 15 * 1000;
 const TRANSIENT_ERRORS = /error code (7|28|35|52|55|56)\b/;
+const TLS_ERROR = /error code 35\b/;
 const TIMEOUT = Symbol("timeout");
 
 const streams = {};
@@ -19,13 +24,144 @@ const streams = {};
 let active_requests = 0;
 const request_queue = [];
 
+let tls_failure_streak = 0;
+let last_recovery = 0;
+let recovering = null;
+let ws_url = null;
+
 let session_ready_resolve;
 const session_ready = new Promise((resolve) => {
   session_ready_resolve = resolve;
 });
 
+let tracker_blocking = true;
+export function set_tracker_blocking(enabled) {
+  tracker_blocking = !!enabled;
+}
+
+const BLOCKED_HOSTS = [
+  "googletagmanager.com",
+  "google-analytics.com",
+  "doubleclick.net",
+  "googlesyndication.com",
+  "googleadservices.com",
+  "cloudflareinsights.com",
+  "amazon-adsystem.com",
+  "crwdcntrl.net",
+  "eyeota.net",
+  "optable.co",
+  "confiant-integrations.net",
+  "html-load.cc",
+  "githack.com"
+];
+
+const BLOCKED_URL_PATTERNS = [
+  /^https:\/\/cdn\.jsdelivr\.net\/gh\/ad-shield\//i,
+  /^https:\/\/raw\.githubusercontent\.com\/easylist\//i,
+  /^https:\/\/[a-z0-9]+-\d+-\d+-\d+-\d+\.roblox\.com\/_\/_\/1px\.gif/i,
+  /^https:\/\/sc0(ak)?\.rbxcdn\.com\/test-50kb\.png/i,
+  /^https:\/\/lms-[a-z0-9-]+\.roblox\.com\/1x1\.png/i
+];
+
+const GIF_1X1 = Uint8Array.from(
+  atob("R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7"),
+  (c) => c.charCodeAt(0)
+);
+
+function is_blocked(url) {
+  if (BLOCKED_URL_PATTERNS.some((pattern) => pattern.test(url))) return true;
+  try {
+    let host = new URL(url).hostname.toLowerCase();
+    return BLOCKED_HOSTS.some((blocked) => host === blocked || host.endsWith("." + blocked));
+  }
+  catch {
+    return false;
+  }
+}
+
+function blocked_payload(url) {
+  let path = "";
+  try {
+    path = new URL(url).pathname.toLowerCase();
+  }
+  catch {}
+  let is_script = path.endsWith(".js");
+  let mime = is_script ? "application/javascript" : "image/gif";
+  let body = is_script ? null : GIF_1X1;
+
+  return {
+    headers: [["content-type", mime]],
+    items: {
+      ok: true,
+      redirected: false,
+      status: 200,
+      statusText: "OK",
+      type: "basic",
+      url: url,
+      raw_headers: []
+    },
+    mime_type: mime,
+    stream_id: body ? register_buffer_stream(body, url) : null
+  };
+}
+
+try {
+  const original_set_websocket = libcurl.set_websocket.bind(libcurl);
+  libcurl.set_websocket = (url) => {
+    ws_url = url;
+    return original_set_websocket(url);
+  };
+}
+catch (e) {
+  console.warn("sandstone host: could not wrap set_websocket:", String(e?.message ?? e));
+}
+
 export function set_websocket(url) {
   libcurl.set_websocket(url);
+}
+
+function make_session() {
+  try {
+    return new libcurl.HTTPSession({enable_cookies: true});
+  }
+  catch (e) {
+    console.warn("sandstone host: cookie-enabled session failed, using a plain session:", error_message(e));
+    return new libcurl.HTTPSession();
+  }
+}
+
+function recover_session() {
+  if (recovering) return recovering;
+  if (Date.now() - last_recovery < RECOVER_MIN_GAP_MS) return null;
+  last_recovery = Date.now();
+  tls_failure_streak = 0;
+
+  recovering = (async () => {
+    console.warn("sandstone host: repeated TLS failures, resetting wisp connection and libcurl session");
+    try {
+      if (ws_url) libcurl.set_websocket(ws_url);
+    }
+    catch (e) {
+      console.warn("sandstone host: reconnect failed:", error_message(e));
+    }
+    await sleep(500);
+    session = make_session();
+  })().catch((e) => {
+    console.error("sandstone host: session recovery failed:", error_message(e));
+  }).finally(() => {
+    recovering = null;
+  });
+  return recovering;
+}
+
+function note_success() {
+  tls_failure_streak = 0;
+}
+
+function note_failure(error) {
+  if (!TLS_ERROR.test(error_message(error))) return;
+  tls_failure_streak++;
+  if (tls_failure_streak >= RECOVER_AFTER_FAILURES) recover_session();
 }
 
 function acquire_slot() {
@@ -56,19 +192,48 @@ function is_transient(error) {
   return TRANSIENT_ERRORS.test(error_message(error));
 }
 
+function with_timeout(promise, ms, url) {
+  let timer;
+  let timed_out = false;
+
+  promise.then((response) => {
+    if (!timed_out) return;
+    try {
+      response?.body?.cancel?.().catch?.(() => {});
+    }
+    catch {}
+  }, () => {});
+
+  let timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => {
+      timed_out = true;
+      reject(new Error(`Request "${url}" failed with error code 28: timed out`));
+    }, ms);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
+
 async function fetch_with_retry(url, options) {
   let method = String(options?.method || "GET").toUpperCase();
   let can_retry = method === "GET" || method === "HEAD";
   let attempt = 0;
 
   while (true) {
+    if (recovering) await recovering;
     try {
-      return await session.fetch(url, options ? {...options} : undefined);
+      let response = await with_timeout(
+        session.fetch(url, options ? {...options} : undefined),
+        REQUEST_TIMEOUT_MS,
+        url
+      );
+      note_success();
+      return response;
     }
     catch (e) {
+      note_failure(e);
       if (!can_retry || attempt >= MAX_RETRIES || !is_transient(e)) throw e;
       attempt++;
-      await sleep(300 * attempt);
+      await sleep(400 * attempt + Math.random() * 300);
     }
   }
 }
@@ -97,6 +262,44 @@ function end_stream(stream_id) {
     stream.reader.cancel().catch(() => {});
   }
   catch {}
+}
+
+function enforce_stream_cap() {
+  let ids = Object.keys(streams);
+  if (ids.length <= MAX_OPEN_STREAMS) return;
+  let now = Date.now();
+  let candidates = ids
+    .filter((id) => now - streams[id].touched > 10 * 1000)
+    .sort((a, b) => streams[a].touched - streams[b].touched);
+  for (let id of candidates) {
+    if (Object.keys(streams).length <= MAX_OPEN_STREAMS) break;
+    end_stream(id);
+  }
+}
+
+function register_buffer_stream(buffer, url) {
+  let stream_id = Math.random() + "";
+  let delivered = false;
+  streams[stream_id] = {
+    reader: {
+      read: async () => {
+        if (delivered) return {done: true, value: undefined};
+        delivered = true;
+        return {done: false, value: buffer};
+      },
+      cancel: async () => {}
+    },
+    pending: null,
+    finished: false,
+    error: null,
+    received: 0,
+    resumes: 0,
+    url: url,
+    options: undefined,
+    touched: Date.now(),
+    can_resume: false
+  };
+  return stream_id;
 }
 
 async function read_with_timeout(stream, wait_ms) {
@@ -179,6 +382,8 @@ function safe_close(ws_info) {
 }
 
 rpc_handlers["fetch"] = async function(url, options) {
+  if (tracker_blocking && is_blocked(url)) return blocked_payload(url);
+
   if (!session) await session_ready;
   await acquire_slot();
 
@@ -211,6 +416,21 @@ rpc_handlers["fetch"] = async function(url, options) {
     let encoding = (response.headers.get("content-encoding") || "").toLowerCase();
     let ranges = (response.headers.get("accept-ranges") || "").toLowerCase();
 
+    let bodyless = (
+      method === "HEAD" ||
+      response.status === 204 ||
+      response.status === 205 ||
+      response.status === 304 ||
+      response.headers.get("content-length") === "0"
+    );
+    if (bodyless) {
+      try {
+        response.body?.cancel?.().catch?.(() => {});
+      }
+      catch {}
+      return payload;
+    }
+
     if (typeof response.body?.getReader === "function") {
       let stream_id = Math.random() + "";
       streams[stream_id] = {
@@ -236,30 +456,10 @@ rpc_handlers["fetch"] = async function(url, options) {
     else {
       let blob = await response.blob();
       let buffer = new Uint8Array(await blob.arrayBuffer());
-      let stream_id = Math.random() + "";
-      let delivered = false;
-      streams[stream_id] = {
-        reader: {
-          read: async () => {
-            if (delivered) return {done: true, value: undefined};
-            delivered = true;
-            return {done: false, value: buffer};
-          },
-          cancel: async () => {}
-        },
-        pending: null,
-        finished: false,
-        error: null,
-        received: 0,
-        resumes: 0,
-        url: url,
-        options: undefined,
-        touched: Date.now(),
-        can_resume: false
-      };
-      payload.stream_id = stream_id;
+      payload.stream_id = register_buffer_stream(buffer, url);
     }
 
+    enforce_stream_cap();
     return payload;
   }
   finally {
@@ -328,7 +528,7 @@ setInterval(() => {
   for (let [stream_id, stream] of Object.entries(streams)) {
     if (now - stream.touched > STREAM_IDLE_MS) end_stream(stream_id);
   }
-}, 30000);
+}, 15000);
 
 rpc_handlers["ws_new"] = function (frame_id, url, protocols, options) {
   let ws_id = Math.random() + "";
@@ -445,12 +645,6 @@ export function clean_ws_connections(id_to_clean) {
 
 libcurl.events.addEventListener("libcurl_load", () => {
   console.log(`libcurl.js v${libcurl.version.lib} loaded`);
-  try {
-    session = new libcurl.HTTPSession({enable_cookies: true});
-  }
-  catch (e) {
-    console.warn("sandstone host: cookie-enabled session failed, using a plain session:", error_message(e));
-    session = new libcurl.HTTPSession();
-  }
+  session = make_session();
   session_ready_resolve();
 });
