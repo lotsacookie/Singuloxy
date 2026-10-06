@@ -1,6 +1,9 @@
 import * as network from "../network.mjs";
 import { ctx } from "../context.mjs";
 
+const PROGRESS_INTERVAL_MS = 50;
+const MAX_PREALLOCATE_BYTES = 1024 * 1024 * 1024;
+
 export class FakeXMLHttpRequest extends EventTarget {
   static UNSENT = 0;
   static OPENED = 1;
@@ -22,6 +25,7 @@ export class FakeXMLHttpRequest extends EventTarget {
   #req_url;
   #req_options;
   #aborted;
+  #reader;
 
   constructor() {
     super();
@@ -50,6 +54,7 @@ export class FakeXMLHttpRequest extends EventTarget {
     this.#req_options = {};
     this.#aborted = false;
     this.#upload = new EventTarget();
+    this.#reader = null;
   }
 
   #emit_event(event, target) {
@@ -71,6 +76,10 @@ export class FakeXMLHttpRequest extends EventTarget {
 
   abort() {
     this.#aborted = true;
+    try {
+      this.#reader?.cancel().catch(() => {});
+    }
+    catch {}
     this.readyState = this.UNSENT;
     this.#response = null;
     this.#emit_event(new ProgressEvent("abort"));
@@ -124,6 +133,69 @@ export class FakeXMLHttpRequest extends EventTarget {
     options.body = buffer.byteLength ? buffer : undefined;
   }
 
+  async #read_body() {
+    let response = this.#response;
+    let reader = response.body && typeof response.body.getReader === "function" ? response.body.getReader() : null;
+    if (!reader) {
+      this.#response_data = await response.arrayBuffer();
+      return;
+    }
+    this.#reader = reader;
+
+    let encoding = (response.headers.get("content-encoding") || "").toLowerCase();
+    let length_header = Number(response.headers.get("content-length"));
+    let identity = encoding === "" || encoding === "identity";
+    let total = identity && Number.isFinite(length_header) && length_header > 0 ? length_header : 0;
+    let computable = total > 0;
+
+    let buffer = computable && total <= MAX_PREALLOCATE_BYTES ? new Uint8Array(total) : null;
+    let parts = [];
+    let loaded = 0;
+    let last_emit = 0;
+
+    while (true) {
+      let result = await reader.read();
+      if (this.#aborted) return;
+      if (result.done) break;
+
+      let chunk = result.value;
+      if (buffer && loaded + chunk.byteLength <= buffer.byteLength) {
+        buffer.set(chunk, loaded);
+      }
+      else {
+        if (buffer) {
+          parts.push(buffer.subarray(0, loaded));
+          buffer = null;
+        }
+        parts.push(chunk);
+      }
+      loaded += chunk.byteLength;
+
+      let now = performance.now();
+      if (now - last_emit >= PROGRESS_INTERVAL_MS) {
+        last_emit = now;
+        this.#emit_event(new ProgressEvent("progress", {
+          lengthComputable: computable,
+          loaded: loaded,
+          total: computable ? total : 0
+        }));
+      }
+    }
+
+    if (buffer) {
+      this.#response_data = loaded === buffer.byteLength ? buffer.buffer : buffer.buffer.slice(0, loaded);
+    }
+    else {
+      let merged = new Uint8Array(loaded);
+      let offset = 0;
+      for (let part of parts) {
+        merged.set(part, offset);
+        offset += part.byteLength;
+      }
+      this.#response_data = merged.buffer;
+    }
+  }
+
   send(body) {
     let options = {...this.#req_options, headers: {...this.#req_options.headers}};
     let timed_out = false;
@@ -136,6 +208,10 @@ export class FakeXMLHttpRequest extends EventTarget {
         if (this.readyState === this.DONE || this.#aborted) return;
         timed_out = true;
         this.#aborted = true;
+        try {
+          this.#reader?.cancel().catch(() => {});
+        }
+        catch {}
         this.readyState = this.DONE;
         this.#emit_event(new ProgressEvent("timeout"));
         this.#emit_event(new ProgressEvent("loadend"));
@@ -150,7 +226,7 @@ export class FakeXMLHttpRequest extends EventTarget {
         this.readyState = this.HEADERS_RECEIVED;
         this.readyState = this.LOADING;
   
-        this.#response_data = await this.#response.arrayBuffer();
+        await this.#read_body();
         if (this.#aborted) return;
         let size = this.#response_data.byteLength;
         this.#emit_event(new ProgressEvent("progress", {lengthComputable: true, loaded: size, total: size}));
@@ -242,4 +318,4 @@ export class FakeXMLHttpRequest extends EventTarget {
   get upload() {
     return this.#upload;
   }
-  }
+}
