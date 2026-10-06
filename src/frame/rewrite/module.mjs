@@ -10,12 +10,13 @@ const module_cache = new Map();
 const import_map = { imports: {} };
 
 const STUB_MODULE_SRC = "export default undefined;\n";
+const MODULE_PARSE_OPTIONS = { ranges: true, webcompat: true, next: true, module: true };
 
 export const pending_modules = [];
 let module_order = 0;
 
-function make_blob_url(js_text) {
-  let blob = new Blob([js_text], { type: "text/javascript" });
+function make_blob_url(js_text, mime = "text/javascript") {
+  let blob = new Blob([js_text], { type: mime });
   return URL.createObjectURL(blob);
 }
 
@@ -65,6 +66,14 @@ export function rewrite_import_map(script_element) {
   }
 }
 
+function has_json_attribute(node) {
+  let attributes = node.attributes || node.assertions || [];
+  return attributes.some((attribute) => {
+    let key = attribute.key?.name ?? attribute.key?.value;
+    return key === "type" && attribute.value?.value === "json";
+  });
+}
+
 class ImportVisitor {
   constructor() {
     this.records = [];
@@ -81,7 +90,8 @@ class ImportVisitor {
       type: "static",
       start: node.source.start,
       end: node.source.end,
-      specifier: node.source.value
+      specifier: node.source.value,
+      json: has_json_attribute(node)
     });
   }
 
@@ -96,7 +106,9 @@ class ImportVisitor {
       start: node.start,
       end: node.end,
       source_start: node.source.start,
-      source_end: node.source.end
+      source_end: node.source.end,
+      options_start: node.options ? node.options.start : null,
+      options_end: node.options ? node.options.end : null
     });
   }
 
@@ -110,13 +122,13 @@ class ImportVisitor {
   }
 }
 
-function find_module_imports(js) {
+function find_module_imports(js, base_url) {
   let ast;
   try {
-    ast = meriyah.parse(js, { ranges: true, webcompat: true, module: true });
+    ast = meriyah.parse(js, MODULE_PARSE_OPTIONS);
   }
   catch (e) {
-    console.error("sandstone: module parse error", e);
+    console.error("sandstone: module parse error", base_url, e);
     return [];
   }
   let visitor = new ImportVisitor();
@@ -138,8 +150,25 @@ function apply_splices(js, splices) {
   return out;
 }
 
+async function load_json_module(url) {
+  let cache_key = "json:" + url;
+  if (module_cache.has(cache_key)) {
+    return module_cache.get(cache_key);
+  }
+  let promise = (async () => {
+    let response = await network.fetch(url);
+    if (response.ok === false) {
+      throw new Error("failed to fetch json module " + url + " (status " + response.status + ")");
+    }
+    return make_blob_url(await response.text(), "application/json");
+  })();
+  module_cache.set(cache_key, promise);
+  promise.catch(() => module_cache.delete(cache_key));
+  return promise;
+}
+
 async function resolve_and_rewrite(js, base_url, chain) {
-  let records = find_module_imports(js);
+  let records = find_module_imports(js, base_url);
 
   let results = await Promise.all(records.map(async (record) => {
     if (record.type === "import_meta_url") {
@@ -148,15 +177,23 @@ async function resolve_and_rewrite(js, base_url, chain) {
 
     if (record.type === "dynamic") {
       let source_text = js.substring(record.source_start, record.source_end);
+      let options_text = record.options_start !== null
+        ? ", " + JSON.stringify(base_url) + ", " + js.substring(record.options_start, record.options_end)
+        : ", " + JSON.stringify(base_url);
       return {
         start: record.start,
         end: record.end,
-        replacement: "__dynamic_import__(" + source_text + ", " + JSON.stringify(base_url) + ")"
+        replacement: "__dynamic_import__(" + source_text + options_text + ")"
       };
     }
 
     let absolute = resolve_specifier(record.specifier, base_url);
     if (!should_proxy(absolute)) return null;
+
+    if (record.json) {
+      let json_url = await load_json_module(absolute);
+      return { start: record.start, end: record.end, replacement: JSON.stringify(json_url) };
+    }
 
     let blob_url;
     if (chain.has(absolute)) {
@@ -171,7 +208,7 @@ async function resolve_and_rewrite(js, base_url, chain) {
 
   let splices = results.filter((splice) => splice);
   let with_imports_rewritten = apply_splices(js, splices);
-  return parser.rewrite_js(with_imports_rewritten, true);
+  return parser.rewrite_js(with_imports_rewritten, true, base_url);
 }
 
 export async function load_module(cache_key, base_url, source_text = null, chain = new Set()) {
@@ -200,10 +237,15 @@ export async function load_module(cache_key, base_url, source_text = null, chain
   return promise;
 }
 
-export async function dynamic_import(specifier, base_url) {
+export async function dynamic_import(specifier, base_url, options) {
   let absolute = resolve_specifier(String(specifier), base_url || ctx.location.href);
   if (!should_proxy(absolute)) {
     return import(/* webpackIgnore: true */ absolute);
+  }
+  let import_type = options?.with?.type ?? options?.assert?.type;
+  if (import_type === "json") {
+    let json_url = await load_json_module(absolute);
+    return import(/* webpackIgnore: true */ json_url, { with: { type: "json" } });
   }
   let blob_url = await load_module(absolute, absolute);
   return import(/* webpackIgnore: true */ blob_url);
