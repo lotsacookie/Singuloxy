@@ -17,7 +17,8 @@ const REQUEST_TIMEOUT_MS = 45 * 1000;
 const COALESCE_BYTES = 2 * 1024 * 1024;
 const COALESCE_WAIT_MS = 8;
 const STREAM_IDLE_MS = 2 * 60 * 1000;
-const MAX_OPEN_STREAMS = 48;
+const EVICT_IDLE_MS = 30 * 1000;
+const MAX_OPEN_STREAMS = 128;
 const HOST_FAIL_THRESHOLD = 3;
 const HOST_BLOCK_MS = 30 * 1000;
 const SHRINK_HOST_COUNT = 3;
@@ -489,6 +490,12 @@ function usable_segmented(response) {
   return response.status === 206 && content_range_total(response) !== null && is_identity(response);
 }
 
+function expected_length(response, method) {
+  if (method !== "GET" || response.status !== 200 || !is_identity(response)) return null;
+  let length = Number(response.headers.get("content-length"));
+  return Number.isFinite(length) && length > 0 ? length : null;
+}
+
 async function download_segment(url, options, host, start, end, seed) {
   let expected = end - start + 1;
   let response = seed;
@@ -614,10 +621,11 @@ function create_segmented_reader(url, options, host, total, first_response) {
   };
 }
 
-function end_stream(stream_id) {
+function end_stream(stream_id, reason = "done") {
   let stream = streams[stream_id];
   if (!stream) return;
   delete streams[stream_id];
+  stream.ended = stream.ended || reason;
   try {
     stream.reader.cancel().catch(() => {});
   }
@@ -627,7 +635,7 @@ function end_stream(stream_id) {
 export function end_streams_for(owners) {
   if (!Array.isArray(owners) || owners.length === 0) return;
   for (let [stream_id, stream] of Object.entries(streams)) {
-    if (stream.owner && owners.includes(stream.owner)) end_stream(stream_id);
+    if (stream.owner && owners.includes(stream.owner)) end_stream(stream_id, "cancelled");
   }
 }
 
@@ -636,18 +644,34 @@ function enforce_stream_cap() {
   if (ids.length <= MAX_OPEN_STREAMS) return;
   let now = Date.now();
   let candidates = ids
-    .filter((id) => now - streams[id].touched > 10 * 1000)
+    .filter((id) => !streams[id].reading && now - streams[id].touched > EVICT_IDLE_MS)
     .sort((a, b) => streams[a].touched - streams[b].touched);
   for (let id of candidates) {
     if (Object.keys(streams).length <= MAX_OPEN_STREAMS) break;
-    end_stream(id);
+    end_stream(id, "evicted");
   }
+}
+
+function new_stream(fields) {
+  return {
+    pending: null,
+    finished: false,
+    error: null,
+    received: 0,
+    resumes: 0,
+    touched: Date.now(),
+    can_resume: false,
+    expected: null,
+    ended: null,
+    reading: false,
+    ...fields
+  };
 }
 
 function register_buffer_stream(buffer, url, owner = null) {
   let stream_id = Math.random() + "";
   let delivered = false;
-  streams[stream_id] = {
+  streams[stream_id] = new_stream({
     reader: {
       read: async () => {
         if (delivered) return {done: true, value: undefined};
@@ -657,16 +681,9 @@ function register_buffer_stream(buffer, url, owner = null) {
       cancel: async () => {}
     },
     owner: owner,
-    pending: null,
-    finished: false,
-    error: null,
-    received: 0,
-    resumes: 0,
     url: url,
-    options: undefined,
-    touched: Date.now(),
-    can_resume: false
-  };
+    options: undefined
+  });
   return stream_id;
 }
 
@@ -853,19 +870,13 @@ rpc_handlers["fetch"] = async function(url, options) {
       payload.headers.push(["content-length", String(total)]);
 
       let stream_id = Math.random() + "";
-      streams[stream_id] = {
+      streams[stream_id] = new_stream({
         reader: create_segmented_reader(url, options ? {...options} : undefined, host, total, response),
         owner: owner,
-        pending: null,
-        finished: false,
-        error: null,
-        received: 0,
-        resumes: 0,
         url: url,
         options: options ? {...options} : undefined,
-        touched: Date.now(),
-        can_resume: false
-      };
+        expected: total
+      });
       payload.stream_id = stream_id;
       enforce_stream_cap();
       return payload;
@@ -891,17 +902,12 @@ rpc_handlers["fetch"] = async function(url, options) {
 
     if (typeof response.body?.getReader === "function") {
       let stream_id = Math.random() + "";
-      streams[stream_id] = {
+      streams[stream_id] = new_stream({
         reader: response.body.getReader(),
         owner: owner,
-        pending: null,
-        finished: false,
-        error: null,
-        received: 0,
-        resumes: 0,
         url: url,
         options: options ? {...options} : undefined,
-        touched: Date.now(),
+        expected: expected_length(response, method),
         can_resume: (
           method === "GET" &&
           response.status === 200 &&
@@ -909,7 +915,7 @@ rpc_handlers["fetch"] = async function(url, options) {
           (encoding === "" || encoding === "identity") &&
           !has_header(options?.headers, "range")
         )
-      };
+      });
       payload.stream_id = stream_id;
     }
     else {
@@ -931,62 +937,87 @@ rpc_handlers["fetch_read"] = async function(stream_id) {
   let stream = streams[stream_id];
   if (!stream) return null;
   stream.touched = Date.now();
+  stream.reading = true;
 
-  if (stream.error) {
-    let error = stream.error;
-    stream.error = null;
-    await recover_stream(stream_id, stream, error);
-  }
-  if (stream.finished) {
-    end_stream(stream_id);
-    return null;
-  }
-
-  let parts = [];
-  let size = 0;
-
-  while (true) {
-    let result;
-    try {
-      result = await read_with_timeout(stream, parts.length > 0 ? COALESCE_WAIT_MS : null);
+  try {
+    if (stream.error) {
+      let error = stream.error;
+      stream.error = null;
+      await recover_stream(stream_id, stream, error);
     }
-    catch (e) {
-      if (parts.length > 0) {
-        stream.error = e;
-        break;
+    if (stream.finished) {
+      end_stream(stream_id);
+      return null;
+    }
+
+    let parts = [];
+    let size = 0;
+
+    while (true) {
+      let result;
+      try {
+        result = await read_with_timeout(stream, parts.length > 0 ? COALESCE_WAIT_MS : null);
       }
-      await recover_stream(stream_id, stream, e);
-      continue;
+      catch (e) {
+        if (parts.length > 0) {
+          stream.error = e;
+          break;
+        }
+        await recover_stream(stream_id, stream, e);
+        continue;
+      }
+
+      if (result === TIMEOUT) break;
+
+      if (result.done) {
+        if (stream.ended === "cancelled") return null;
+        if (stream.ended && stream.ended !== "done") {
+          throw new Error("Request failed with error code 18: download was interrupted");
+        }
+
+        let problem = null;
+        if (stream.expected !== null && stream.received < stream.expected) {
+          problem = new Error(`Request failed with error code 18: transfer ended early (${stream.received} of ${stream.expected} bytes)`);
+        }
+        if (!problem) {
+          stream.finished = true;
+          break;
+        }
+        if (parts.length > 0) {
+          stream.error = problem;
+          break;
+        }
+        await recover_stream(stream_id, stream, problem);
+        continue;
+      }
+
+      parts.push(result.value);
+      size += result.value.byteLength;
+      stream.received += result.value.byteLength;
+      stream.touched = Date.now();
+      if (size >= COALESCE_BYTES) break;
     }
 
-    if (result === TIMEOUT) break;
-    if (result.done) {
-      stream.finished = true;
-      break;
+    if (parts.length === 0) {
+      end_stream(stream_id);
+      return null;
     }
 
-    parts.push(result.value);
-    size += result.value.byteLength;
-    stream.received += result.value.byteLength;
-    if (size >= COALESCE_BYTES) break;
+    return merge_chunks(parts, size);
   }
-
-  if (parts.length === 0) {
-    end_stream(stream_id);
-    return null;
+  finally {
+    stream.reading = false;
   }
-
-  return merge_chunks(parts, size);
 }
 
 rpc_handlers["fetch_cancel"] = function(stream_id) {
-  end_stream(stream_id);
+  end_stream(stream_id, "cancelled");
 }
 
 setInterval(() => {
   let now = Date.now();
   for (let [stream_id, stream] of Object.entries(streams)) {
-    if (now - stream.touched > STREAM_IDLE_MS) end_stream(stream_id);
+    if (!stream.reading && now - stream.touched > STREAM_IDLE_MS) end_stream(stream_id, "evicted");
   }
 }, 15000);
 
