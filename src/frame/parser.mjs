@@ -3,6 +3,8 @@ import { ctx_vars, unreadable_vars } from "./context.mjs";
 import * as meriyah from "meriyah";
 import * as astray from 'astray';
 
+const AsyncFunction = Object.getPrototypeOf(async function() {}).constructor;
+
 const script_parse_attempts = [
   {webcompat: true},
   {webcompat: true, next: true, globalReturn: true, specDeviation: true},
@@ -14,20 +16,26 @@ const module_parse_attempts = [
 ];
 
 const MAX_VALIDATE_LENGTH = 8 * 1024 * 1024;
+const MODULE_SYNTAX = /(^|[\n;{}])\s*(import\s*[\w{*"']|export\s+[\w{*])/;
 
 function parse_js(js, is_module) {
   let attempts = is_module ? module_parse_attempts : script_parse_attempts;
-  let last_error;
+  let errors = [];
 
   for (let options of attempts) {
     try {
       return meriyah.parse(js, {ranges: true, ...options});
     }
     catch (e) {
-      last_error = e;
+      errors.push(e);
     }
   }
 
+  let last_error = errors[errors.length - 1];
+  try {
+    last_error.attempt_errors = errors;
+  }
+  catch {}
   throw last_error;
 }
 
@@ -41,6 +49,50 @@ function can_parse(js, is_module) {
     catch {}
   }
   return false;
+}
+
+function position_of(js, line, column) {
+  let position = 0;
+  let current = 1;
+  while (current < line) {
+    let next = js.indexOf("\n", position);
+    if (next === -1) break;
+    position = next + 1;
+    current++;
+  }
+  return position + column;
+}
+
+function locate_error(js, e) {
+  if (typeof e?.index === "number") return e.index;
+  if (typeof e?.start === "number") return e.start;
+  if (typeof e?.line === "number" && typeof e?.column === "number") {
+    return position_of(js, e.line, e.column);
+  }
+  let match = /\[(\d+):(\d+)/.exec(String(e?.message ?? ""));
+  if (match) return position_of(js, Number(match[1]), Number(match[2]));
+  return null;
+}
+
+function describe_error(js, e) {
+  let message = String(e?.message ?? e);
+  let index = locate_error(js, e);
+  if (index === null || !Number.isFinite(index)) return message;
+  let start = Math.max(0, index - 70);
+  let snippet = js.slice(start, index + 70).replace(/\s+/g, " ");
+  return `${message} (offset ${index} of ${js.length}) near: ${snippet}`;
+}
+
+function browser_can_parse(js) {
+  if (js.length > MAX_VALIDATE_LENGTH) return null;
+  if (MODULE_SYNTAX.test(js)) return null;
+  try {
+    new AsyncFunction(js);
+    return true;
+  }
+  catch (e) {
+    return e instanceof SyntaxError ? false : null;
+  }
 }
 
 function is_non_reference(node, parent) {
@@ -182,13 +234,25 @@ function gen_rewrite_code(rewrite) {
   throw new Error("invalid rewrite type");
 }
 
-export function rewrite_js(js, is_module = false) {
+export function rewrite_js(js, is_module = false, label = "") {
   let ast;
   try {
     ast = parse_js(js, is_module);
   }
   catch (e) {
-    console.error("sandstone: JS parse error, script left UNREWRITTEN (it will bypass the proxy):", e?.message ?? e);
+    let errors = Array.isArray(e?.attempt_errors) ? e.attempt_errors : [e];
+    let details = errors.map((error, i) => `attempt ${i + 1}: ${describe_error(js, error)}`).join(" | ");
+    let verdict = "";
+    if (!is_module) {
+      let browser_ok = browser_can_parse(js);
+      if (browser_ok === false) {
+        verdict = " The browser cannot parse this script either, so the download is probably truncated or corrupted.";
+      }
+      else if (browser_ok === true) {
+        verdict = " The browser accepts this script, so this is a parser limitation.";
+      }
+    }
+    console.error(`sandstone: JS parse error, script left UNREWRITTEN (it will bypass the proxy): ${label || "(inline or unnamed script)"}, ${js.length} chars. ${details}.${verdict}`);
     return js;
   }
   let ast_visitor = new ASTVisitor(ast);
@@ -207,7 +271,7 @@ export function rewrite_js(js, is_module = false) {
 
   let result = rewritten_js || js;
   if (ast_visitor.rewrites.length > 0 && js.length <= MAX_VALIDATE_LENGTH && !can_parse(result, is_module)) {
-    console.warn("sandstone: rewriting produced invalid JS, script left UNREWRITTEN (it will bypass the proxy)");
+    console.warn(`sandstone: rewriting produced invalid JS, script left UNREWRITTEN (it will bypass the proxy): ${label || "(inline or unnamed script)"}`);
     return js;
   }
   return result;
