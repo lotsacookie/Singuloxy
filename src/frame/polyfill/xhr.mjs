@@ -2,6 +2,8 @@ import * as network from "../network.mjs";
 import { ctx } from "../context.mjs";
 
 const PROGRESS_INTERVAL_MS = 50;
+const LOG_INTERVAL_MS = 2000;
+const LOG_MIN_BYTES = 1024 * 1024;
 const MAX_PREALLOCATE_BYTES = 1024 * 1024 * 1024;
 
 export class FakeXMLHttpRequest extends EventTarget {
@@ -135,6 +137,7 @@ export class FakeXMLHttpRequest extends EventTarget {
 
   async #read_body() {
     let response = this.#response;
+    let href = this.#req_url?.href;
     let reader = response.body && typeof response.body.getReader === "function" ? response.body.getReader() : null;
     if (!reader) {
       this.#response_data = await response.arrayBuffer();
@@ -143,15 +146,28 @@ export class FakeXMLHttpRequest extends EventTarget {
     this.#reader = reader;
 
     let encoding = (response.headers.get("content-encoding") || "").toLowerCase();
-    let length_header = Number(response.headers.get("content-length"));
+    let length_header = response.headers.get("content-length");
+    let length_value = Number(length_header);
     let identity = encoding === "" || encoding === "identity";
-    let total = identity && Number.isFinite(length_header) && length_header > 0 ? length_header : 0;
+    let total = Number.isFinite(length_value) && length_value > 0 ? length_value : 0;
     let computable = total > 0;
+    let verbose = total >= LOG_MIN_BYTES || total === 0;
 
-    let buffer = computable && total <= MAX_PREALLOCATE_BYTES ? new Uint8Array(total) : null;
+    if (verbose) {
+      console.log("sandstone: xhr download started", href, {
+        contentLength: length_header,
+        contentEncoding: encoding || "none",
+        status: response.status
+      });
+    }
+
+    let buffer = identity && computable && total <= MAX_PREALLOCATE_BYTES ? new Uint8Array(total) : null;
     let parts = [];
     let loaded = 0;
     let last_emit = 0;
+    let last_log = performance.now();
+    let started = performance.now();
+    let events = 0;
 
     while (true) {
       let result = await reader.read();
@@ -174,11 +190,19 @@ export class FakeXMLHttpRequest extends EventTarget {
       let now = performance.now();
       if (now - last_emit >= PROGRESS_INTERVAL_MS) {
         last_emit = now;
+        events++;
+        let reported = loaded;
+        if (computable && !identity) reported = Math.min(loaded, Math.max(total - 1, 0));
         this.#emit_event(new ProgressEvent("progress", {
           lengthComputable: computable,
-          loaded: loaded,
+          loaded: reported,
           total: computable ? total : 0
         }));
+      }
+
+      if (verbose && now - last_log >= LOG_INTERVAL_MS) {
+        last_log = now;
+        console.log("sandstone: xhr download progress", href, loaded, "of", computable ? total : "unknown");
       }
     }
 
@@ -193,6 +217,10 @@ export class FakeXMLHttpRequest extends EventTarget {
         offset += part.byteLength;
       }
       this.#response_data = merged.buffer;
+    }
+
+    if (verbose) {
+      console.log("sandstone: xhr download finished", href, loaded, "bytes in", Math.round(performance.now() - started), "ms,", events, "progress events");
     }
   }
 
