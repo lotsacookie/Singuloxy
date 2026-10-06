@@ -10,6 +10,7 @@ const MIN_CONCURRENT_REQUESTS = 2;
 const GROW_AFTER_SUCCESSES = 10;
 const COOLDOWN_MS = 1500;
 const MAX_RETRIES = 3;
+const MAX_CONNECT_RETRIES = 1;
 const MAX_TLS_RETRIES = 3;
 const MAX_PER_HOST = 6;
 const MAX_RESUMES = 5;
@@ -24,8 +25,15 @@ const HOST_BLOCK_MS = 30 * 1000;
 const SHRINK_HOST_COUNT = 3;
 const SHRINK_WINDOW_MS = 10 * 1000;
 const TEST_TIMEOUT_MS = 15 * 1000;
+const LOG_THROTTLE_MS = 10 * 1000;
+const WISP_FAIL_THRESHOLD = 4;
+const WISP_FAIL_WINDOW_MS = 8 * 1000;
+const WISP_BACKOFF_MIN_MS = 4 * 1000;
+const WISP_BACKOFF_MAX_MS = 30 * 1000;
+const WISP_ROTATE_COOLDOWN_MS = 6 * 1000;
 const TRANSIENT_ERRORS = /error code (7|28|35|52|55|56)\b/;
 const TLS_ERROR = /error code 35\b/;
+const CONNECT_ERROR = /error code 7\b/;
 const CONNECTION_ERRORS = /error code (7|35)\b/;
 const PRE_REQUEST_ERRORS = /error code (7|35)\b/;
 const PARTIAL_ERRORS = /error code (18|56)\b/;
@@ -52,6 +60,7 @@ const streams = {};
 const segmented_hosts = new Set();
 const host_health = new Map();
 const recent_failures = new Map();
+const log_times = new Map();
 
 let active_requests = 0;
 let concurrency_limit = MAX_CONCURRENT_REQUESTS;
@@ -62,6 +71,17 @@ const request_queue = [];
 
 let wisp_pool = [];
 let ws_url = null;
+
+const wisp = {
+  recent: new Map(),
+  tripped: false,
+  down_until: 0,
+  backoff: WISP_BACKOFF_MIN_MS,
+  probing: false,
+  trips: 0,
+  rotations: 0,
+  last_rotation: 0
+};
 
 let session_ready_resolve;
 const session_ready = new Promise((resolve) => {
@@ -112,7 +132,33 @@ const BLOCKED_HOSTS = [
   "optable.co",
   "confiant-integrations.net",
   "html-load.cc",
-  "githack.com"
+  "githack.com",
+  "ads-twitter.com",
+  "analytics.twitter.com",
+  "ads-api.twitter.com",
+  "px.ads.linkedin.com",
+  "snap.licdn.com",
+  "bat.bing.com",
+  "clarity.ms",
+  "hotjar.com",
+  "hotjar.io",
+  "analytics.tiktok.com",
+  "ct.pinterest.com",
+  "scorecardresearch.com",
+  "quantserve.com",
+  "adnxs.com",
+  "adsrvr.org",
+  "criteo.com",
+  "criteo.net",
+  "taboola.com",
+  "outbrain.com",
+  "rubiconproject.com",
+  "pubmatic.com",
+  "openx.net",
+  "casalemedia.com",
+  "moatads.com",
+  "adsafeprotected.com",
+  "3lift.com"
 ];
 
 const BLOCKED_URL_PATTERNS = [
@@ -121,7 +167,9 @@ const BLOCKED_URL_PATTERNS = [
   /^https:\/\/[a-z0-9]+-\d+-\d+-\d+-\d+\.roblox\.com\/_\/_\/1px\.gif/i,
   /^https:\/\/sc0(ak)?\.rbxcdn\.com\/test-50kb\.png/i,
   /^https:\/\/roblox-poc\.global\.ssl\.fastly\.net\/test-50kb\.png/i,
-  /^https:\/\/lms-[a-z0-9-]+\.roblox\.com\/1x1\.png/i
+  /^https:\/\/lms-[a-z0-9-]+\.roblox\.com\/1x1\.png/i,
+  /^https:\/\/t\.co\/i\/adsct/i,
+  /^https:\/\/www\.facebook\.com\/tr[/?]/i
 ];
 
 const GIF_1X1 = Uint8Array.from(
@@ -166,6 +214,25 @@ function blocked_payload(url, owner) {
   };
 }
 
+function log_throttled(kind, host, ...args) {
+  let key = kind + "|" + host;
+  let now = Date.now();
+  let entry = log_times.get(key);
+  if (entry && now - entry.time < LOG_THROTTLE_MS) {
+    entry.skipped++;
+    return;
+  }
+  let skipped = entry ? entry.skipped : 0;
+  log_times.set(key, {time: now, skipped: 0});
+  if (log_times.size > 500) {
+    for (let [old_key, old_entry] of log_times) {
+      if (now - old_entry.time > LOG_THROTTLE_MS) log_times.delete(old_key);
+    }
+  }
+  if (skipped > 0) args.push(`(+${skipped} similar suppressed)`);
+  console.warn(...args);
+}
+
 try {
   const original_set_websocket = libcurl.set_websocket.bind(libcurl);
   libcurl.set_websocket = (url) => {
@@ -194,6 +261,8 @@ export function get_connection_info() {
   return {
     websocket: ws_url,
     wisp_pool: [...wisp_pool],
+    wisp_tripped: wisp.tripped,
+    wisp_retry_in_ms: Math.max(0, wisp.down_until - now),
     concurrency_limit: concurrency_limit,
     active_requests: active_requests,
     queued_requests: request_queue.length,
@@ -240,6 +309,67 @@ function make_session() {
     console.warn("sandstone host: cookie-enabled session failed, using a plain session:", error_message(e));
     return new libcurl.HTTPSession();
   }
+}
+
+function rotate_wisp() {
+  let now = Date.now();
+  if (now - wisp.last_rotation < WISP_ROTATE_COOLDOWN_MS) return;
+  let candidates = wisp_pool.filter((url) => url !== ws_url);
+  if (candidates.length === 0) return;
+  let next = candidates[wisp.rotations % candidates.length];
+  wisp.rotations++;
+  wisp.last_rotation = now;
+  console.warn(`sandstone host: wisp server ${ws_url} looks unreachable, switching to ${next}`);
+  try {
+    libcurl.set_websocket(next);
+  }
+  catch (e) {
+    console.warn("sandstone host: could not switch wisp server:", error_message(e));
+  }
+}
+
+function trip_wisp() {
+  let now = Date.now();
+  wisp.tripped = true;
+  wisp.trips++;
+  wisp.down_until = now + wisp.backoff;
+  console.warn(`sandstone host: many connections are failing, pausing new requests for ${Math.round(wisp.backoff / 1000)}s (wisp server: ${ws_url})`);
+  wisp.backoff = Math.min(wisp.backoff * 2, WISP_BACKOFF_MAX_MS);
+  wisp.recent.clear();
+  if (wisp.trips >= 2) rotate_wisp();
+}
+
+function note_wisp_failure(url) {
+  let now = Date.now();
+  if (wisp.tripped) {
+    if (now >= wisp.down_until) trip_wisp();
+    return;
+  }
+  wisp.recent.set(host_of(url), now);
+  for (let [host, time] of wisp.recent) {
+    if (now - time > WISP_FAIL_WINDOW_MS) wisp.recent.delete(host);
+  }
+  if (wisp.recent.size >= WISP_FAIL_THRESHOLD) trip_wisp();
+}
+
+function note_wisp_success() {
+  if (wisp.tripped) console.log("sandstone host: wisp connection recovered");
+  wisp.recent.clear();
+  wisp.tripped = false;
+  wisp.down_until = 0;
+  wisp.backoff = WISP_BACKOFF_MIN_MS;
+  wisp.trips = 0;
+}
+
+function wisp_gate(url) {
+  if (!wisp.tripped) return false;
+  if (Date.now() < wisp.down_until || wisp.probing) {
+    let error = new Error(`Request "${url}" failed with error code 7: waiting for the wisp server to recover`);
+    error.wisp_paused = true;
+    throw error;
+  }
+  wisp.probing = true;
+  return true;
 }
 
 function drain_requests() {
@@ -292,13 +422,17 @@ function is_host_blocked(url) {
 function note_success(url) {
   host_health.delete(host_of(url));
   recent_failures.delete(host_of(url));
+  note_wisp_success();
   grow_concurrency();
 }
 
 function note_failure(error, url) {
+  if (error?.wisp_paused) return;
   if (!CONNECTION_ERRORS.test(error_message(error))) return;
   let host = host_of(url);
   let now = Date.now();
+
+  if (CONNECT_ERROR.test(error_message(error))) note_wisp_failure(url);
 
   let health = host_health.get(host) || {failures: 0, blocked_until: 0};
   health.failures++;
@@ -403,6 +537,7 @@ async function fetch_with_retry(url, options, ignore_block = false) {
     if (!ignore_block && is_host_blocked(url)) {
       throw new Error(`Request "${url}" failed with error code 35: host is paused after repeated connection failures`);
     }
+    let probe = ignore_block ? false : wisp_gate(url);
     await wait_for_cooldown();
     try {
       let response = await with_timeout(
@@ -410,21 +545,33 @@ async function fetch_with_retry(url, options, ignore_block = false) {
         REQUEST_TIMEOUT_MS,
         url
       );
+      if (probe) {
+        wisp.probing = false;
+        probe = false;
+      }
       note_success(url);
       return response;
     }
     catch (e) {
+      if (probe) {
+        wisp.probing = false;
+        probe = false;
+      }
       note_failure(e, url);
       let message = error_message(e);
       if (!ignore_block && is_host_blocked(url) && CONNECTION_ERRORS.test(message)) throw e;
       let retryable = can_retry ? is_transient(e) : PRE_REQUEST_ERRORS.test(message);
       let tls = TLS_ERROR.test(message);
-      let limit = tls ? MAX_TLS_RETRIES : MAX_RETRIES;
-      if (!retryable || attempt >= limit) throw e;
+      let refused = CONNECT_ERROR.test(message);
+      let limit = tls ? MAX_TLS_RETRIES : refused ? MAX_CONNECT_RETRIES : MAX_RETRIES;
+      if (!retryable || attempt >= limit || wisp.tripped && refused) throw e;
       attempt++;
       let base = tls ? 800 : 400;
       let cap = tls ? 6000 : 4000;
       await sleep(Math.min(base * 2 ** (attempt - 1), cap) + Math.random() * 400);
+    }
+    finally {
+      if (probe) wisp.probing = false;
     }
   }
 }
@@ -806,7 +953,9 @@ rpc_handlers["fetch"] = async function(url, options) {
         }
       }
       catch (e) {
-        console.warn("sandstone host: ranged start failed, using a normal request:", url, error_message(e));
+        if (!e?.wisp_paused) {
+          log_throttled("ranged", host, "sandstone host: ranged start failed, using a normal request:", url, error_message(e));
+        }
       }
     }
 
@@ -837,7 +986,9 @@ rpc_handlers["fetch"] = async function(url, options) {
           catch {}
         }
         if (!recovered) {
-          console.error("sandstone host: libcurl fetch failed:", url, e);
+          if (!e?.wisp_paused) {
+            log_throttled("fetch", host, "sandstone host: libcurl fetch failed:", url, error_message(e));
+          }
           throw new Error(error_message(e));
         }
       }
@@ -1029,7 +1180,7 @@ rpc_handlers["ws_new"] = function (frame_id, url, protocols, options) {
     ws = new libcurl.CurlWebSocket(url, protocols, options);
   }
   catch (e) {
-    console.error("sandstone host: websocket creation failed:", url, e);
+    log_throttled("ws_new", host_of(url), "sandstone host: websocket creation failed:", url, error_message(e));
     throw new Error(error_message(e));
   }
 
