@@ -10,6 +10,8 @@ export const script_state = { phase: "parsing" };
 
 const SCRIPT_DOWNLOAD_ATTEMPTS = 3;
 const SIZE_TOLERANCE_BYTES = 3;
+const GARBLED_SAMPLE_CHARS = 2000;
+const GARBLED_RATIO = 0.02;
 
 let script_num = 0;
 
@@ -51,6 +53,17 @@ export function execute_script(script_element, script_text) {
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function looks_garbled(text) {
+  let sample = text.length > GARBLED_SAMPLE_CHARS ? text.slice(0, GARBLED_SAMPLE_CHARS) : text;
+  if (sample.length === 0) return false;
+  let bad = 0;
+  for (let i = 0; i < sample.length; i++) {
+    let code = sample.charCodeAt(i);
+    if (code === 0xFFFD || (code < 32 && code !== 9 && code !== 10 && code !== 13)) bad++;
+  }
+  return bad / sample.length > GARBLED_RATIO;
 }
 
 function size_problem(response, text) {
@@ -116,12 +129,17 @@ export async function rewrite_script(script_element) {
           break;
         }
         let text = await response.text();
-        let problem = size_problem(response, text);
+        let garbled = looks_garbled(text);
+        let problem = garbled ? "response does not look like JavaScript text" : size_problem(response, text);
         if (problem && !final_attempt) {
           console.warn(`sandstone: script download looks wrong (${problem}), retrying (${attempt}/${SCRIPT_DOWNLOAD_ATTEMPTS - 1}):`, src_url);
           last_error = new Error(problem);
           await sleep(300 * attempt);
           continue;
+        }
+        if (problem && garbled) {
+          last_error = new Error(problem);
+          break;
         }
         if (problem) {
           console.warn(`sandstone: script download still looks wrong (${problem}), using it anyway:`, src_url);
