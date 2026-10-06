@@ -21,6 +21,8 @@ const internal = {
   cookie_jar: null
 };
 
+const GETTER_ONLY_ERROR = /only a getter|read[- ]only|Cannot set property/i;
+
 function create_func_proxy(target, func) {
   let proxy = new Proxy(func, {
     apply: function(func_target, this_arg, args) {
@@ -97,10 +99,15 @@ export function create_obj_proxy(obj, ctx_vars, target) {
       return target[key];
     },
     set: (_, key, value) => {
-      if (ctx_vars.includes(key))
-        assign_handler_value(obj, target, key, value);
-      else
-        target[key] = value;
+      try {
+        if (ctx_vars.includes(key))
+          assign_handler_value(obj, target, key, value);
+        else
+          target[key] = value;
+      }
+      catch (e) {
+        if (!(e instanceof TypeError) || !GETTER_ONLY_ERROR.test(String(e.message))) throw e;
+      }
       return true;
     }
   });
@@ -232,6 +239,33 @@ function install_storage_getters() {
   }
 }
 
+function install_cache_stub() {
+  let cache = {
+    match: async () => undefined,
+    matchAll: async () => [],
+    add: async () => {},
+    addAll: async () => {},
+    put: async () => {},
+    delete: async () => false,
+    keys: async () => []
+  };
+  let storage = {
+    open: async () => cache,
+    has: async () => false,
+    delete: async () => false,
+    keys: async () => [],
+    match: async () => undefined
+  };
+  try {
+    Object.defineProperty(globalThis, "caches", {
+      configurable: true,
+      enumerable: true,
+      get: () => storage
+    });
+  }
+  catch {}
+}
+
 export function update_ctx() {
   internal.location = new polyfill.FakeLocation();
   internal.self = ctx.__proxy__;
@@ -240,7 +274,7 @@ export function update_ctx() {
   internal.localStorage = new polyfill.FakeStorage("local");
   internal.sessionStorage = new polyfill.FakeStorage("session");
   internal.cookie_jar = new polyfill.FakeCookieJar();
-  delete globalThis.caches;
+  install_cache_stub();
   install_storage_getters();
 
   globalThis.__ctx__ = ctx.__proxy__;
