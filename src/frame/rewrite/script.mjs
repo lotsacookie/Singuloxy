@@ -8,6 +8,9 @@ export const pending_scripts = [];
 
 export const script_state = { phase: "parsing" };
 
+const SCRIPT_DOWNLOAD_ATTEMPTS = 3;
+const SIZE_TOLERANCE_BYTES = 3;
+
 let script_num = 0;
 
 const javascript_types = new Set([
@@ -35,7 +38,8 @@ export function execute_script(script_element, script_text) {
   let script = document.createElement("script");
   script.__rewritten__ = true;
   try {
-    script.textContent = parser.rewrite_js(script_text);
+    let label = script_element.getAttribute("__src") || "";
+    script.textContent = parser.rewrite_js(script_text, false, label);
     (document.body || document.documentElement).append(script);
   }
   catch (e) {
@@ -43,6 +47,20 @@ export function execute_script(script_element, script_text) {
   }
   script.remove();
   ctx.document.currentScript = previous;
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function size_problem(response, text) {
+  let encoding = (response.headers?.get("content-encoding") || "").toLowerCase();
+  if (encoding !== "" && encoding !== "identity") return null;
+  let expected = Number(response.headers?.get("content-length"));
+  if (!Number.isFinite(expected) || expected <= 0) return null;
+  let actual = new TextEncoder().encode(text).length;
+  if (Math.abs(actual - expected) <= SIZE_TOLERANCE_BYTES) return null;
+  return `size mismatch: server said ${expected} bytes, received ${actual}`;
 }
 
 export async function rewrite_script(script_element) {
@@ -87,20 +105,40 @@ export async function rewrite_script(script_element) {
   async function download_src() {
     script_element.setAttribute("__src", script_url);
     let src_url = convert_url(script_url, ctx.location.href);
-    try {
-      let response = await network.fetch(src_url);
-      if (response.ok === false) {
-        throw new Error("status " + response.status);
+    let last_error = null;
+
+    for (let attempt = 1; attempt <= SCRIPT_DOWNLOAD_ATTEMPTS; attempt++) {
+      let final_attempt = attempt === SCRIPT_DOWNLOAD_ATTEMPTS;
+      try {
+        let response = await network.fetch(src_url);
+        if (response.ok === false) {
+          last_error = new Error("status " + response.status);
+          break;
+        }
+        let text = await response.text();
+        let problem = size_problem(response, text);
+        if (problem && !final_attempt) {
+          console.warn(`sandstone: script download looks wrong (${problem}), retrying (${attempt}/${SCRIPT_DOWNLOAD_ATTEMPTS - 1}):`, src_url);
+          last_error = new Error(problem);
+          await sleep(300 * attempt);
+          continue;
+        }
+        if (problem) {
+          console.warn(`sandstone: script download still looks wrong (${problem}), using it anyway:`, src_url);
+        }
+        script_text = text;
+        return true;
       }
-      script_text = await response.text();
-      return true;
+      catch (e) {
+        last_error = e;
+        if (!final_attempt) await sleep(300 * attempt);
+      }
     }
-    catch (e) {
-      console.error("sandstone: failed to load script", src_url, e);
-      script_text = "";
-      script_element.dispatchEvent(new Event("error"));
-      return false;
-    }
+
+    console.error("sandstone: failed to load script", src_url, last_error);
+    script_text = "";
+    script_element.dispatchEvent(new Event("error"));
+    return false;
   }
 
   if (!has_src) {
