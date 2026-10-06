@@ -218,6 +218,20 @@ export function wrap_obj(wrapper, target) {
   }
 }
 
+function install_storage_getters() {
+  if (is_worker) return;
+  for (let key of ["localStorage", "sessionStorage"]) {
+    try {
+      Object.defineProperty(globalThis, key, {
+        configurable: true,
+        enumerable: true,
+        get: () => internal[key]
+      });
+    }
+    catch {}
+  }
+}
+
 export function update_ctx() {
   internal.location = new polyfill.FakeLocation();
   internal.self = ctx.__proxy__;
@@ -227,6 +241,7 @@ export function update_ctx() {
   internal.sessionStorage = new polyfill.FakeStorage("session");
   internal.cookie_jar = new polyfill.FakeCookieJar();
   delete globalThis.caches;
+  install_storage_getters();
 
   globalThis.__ctx__ = ctx.__proxy__;
   globalThis.__get_this__ = ctx.__get_this__;
