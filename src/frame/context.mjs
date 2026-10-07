@@ -21,8 +21,26 @@ const internal = {
   cookie_jar: null
 };
 
+var ready = false;
+
 const GETTER_ONLY_ERROR = /only a getter|read[- ]only|Cannot set property/i;
 const OPEN_IN_FRAME = true;
+
+export function is_ready() {
+  return ready === true;
+}
+
+export function page_url() {
+  try {
+    if (ready) return internal.location.href;
+  }
+  catch {}
+  try {
+    if (loader.url) return loader.url;
+  }
+  catch {}
+  return globalThis.location.href;
+}
 
 export function unwrap_this(value) {
   if (value === ctx.__proxy__) return globalThis;
@@ -302,6 +320,8 @@ export function update_ctx() {
   globalThis.__ctx__ = ctx.__proxy__;
   globalThis.__get_this__ = ctx.__get_this__;
   globalThis.__get_var__ = ctx.__get_var__;
+
+  ready = true;
 }
 
 export function get_cookie_jar() {
