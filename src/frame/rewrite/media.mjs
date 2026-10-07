@@ -5,7 +5,7 @@ const PICTURE_IMAGE_TYPES = new Set([
   "image/webp", "image/avif", "image/jpeg", "image/png", "image/gif", "image/svg+xml", "image/apng"
 ]);
 
-const FETCH_ATTEMPTS = 3;
+const FETCH_ATTEMPTS = 6;
 const MAX_MEDIA_CONCURRENCY = 12;
 const IMAGE_CACHE_LIMIT = 200;
 const IMAGE_CACHE_MAX_BYTES = 2 * 1024 * 1024;
@@ -37,6 +37,7 @@ async function download_blob(url) {
   let last_error;
   for (let attempt = 0; attempt < FETCH_ATTEMPTS; attempt++) {
     let permanent = false;
+    await acquire_media_slot();
     try {
       let response = await network.fetch(url);
       if (response.ok === false) {
@@ -51,9 +52,12 @@ async function download_blob(url) {
     }
     catch (e) {
       last_error = e;
-      if (permanent) break;
-      await sleep(400 * (attempt + 1) + Math.random() * 250);
     }
+    finally {
+      release_media_slot();
+    }
+    if (permanent) break;
+    await sleep(Math.min(500 * 2 ** attempt, 6000) + Math.random() * 400);
   }
   throw last_error;
 }
@@ -61,15 +65,7 @@ async function download_blob(url) {
 function fetch_blob(url, cacheable) {
   if (cacheable && image_cache.has(url)) return image_cache.get(url);
 
-  let task = (async () => {
-    await acquire_media_slot();
-    try {
-      return await download_blob(url);
-    }
-    finally {
-      release_media_slot();
-    }
-  })();
+  let task = download_blob(url);
 
   if (cacheable) {
     image_cache.set(url, task);
