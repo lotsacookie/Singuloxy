@@ -22,6 +22,8 @@ const EVICT_IDLE_MS = 30 * 1000;
 const MAX_OPEN_STREAMS = 128;
 const HOST_FAIL_THRESHOLD = 3;
 const HOST_BLOCK_MS = 30 * 1000;
+const TLS_HOST_FAIL_THRESHOLD = 6;
+const TLS_HOST_BLOCK_MS = 15 * 1000;
 const SHRINK_HOST_COUNT = 3;
 const SHRINK_WINDOW_MS = 10 * 1000;
 const TEST_TIMEOUT_MS = 15 * 1000;
@@ -59,6 +61,8 @@ const LARGE_FILE_PATTERN = /\.(zip|7z|rar|tar|pk3|pak|pck|wasm|data|bin|iso|mp4|
 const streams = {};
 const segmented_hosts = new Set();
 const host_health = new Map();
+const host_active = new Map();
+const host_queues = new Map();
 const recent_failures = new Map();
 const log_times = new Map();
 
@@ -176,6 +180,27 @@ const GIF_1X1 = Uint8Array.from(
   atob("R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7"),
   (c) => c.charCodeAt(0)
 );
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function host_of(url) {
+  try {
+    return new URL(url).hostname.toLowerCase();
+  }
+  catch {
+    return String(url);
+  }
+}
+
+async function wait_for_cooldown() {
+  let remaining = cooldown_until - Date.now();
+  while (remaining > 0) {
+    await sleep(remaining + Math.random() * 150);
+    remaining = cooldown_until - Date.now();
+  }
+}
 
 function is_blocked(url) {
   if (BLOCKED_URL_PATTERNS.some((pattern) => pattern.test(url))) return true;
