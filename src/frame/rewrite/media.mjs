@@ -175,6 +175,7 @@ export function rewrite_media(media_element) {
   let media_url = "";
   let latest_request = 0;
   let allow_error = false;
+  let pending = null;
 
   let fetch_src = async (value) => {
     let request_id = ++latest_request;
@@ -218,11 +219,27 @@ export function rewrite_media(media_element) {
       if (!resolve_http_url(value))
         src_descriptor.set.call(media_element, value);
       else {
-        src_descriptor.set.call(media_element, "");
-        fetch_src(value);
+        media_element.removeAttribute("src");
+        pending = fetch_src(value);
       }
     }
   });
+
+  if (is_image) {
+    let current_src_descriptor = intercept_property(media_element, "currentSrc", {
+      configurable: true,
+      get() {
+        let native = current_src_descriptor.get.call(media_element);
+        if (media_url && native.startsWith("blob:")) return media_url;
+        return native;
+      }
+    });
+
+    proxy_function(media_element, "decode", (target, this_arg, args) => {
+      let wait = pending || Promise.resolve();
+      return wait.then(() => Reflect.apply(target, this_arg, args));
+    });
+  }
 
   let apply_srcset = (value) => {
     value = value === null || value === undefined ? "" : String(value);
