@@ -160,8 +160,12 @@ export async function rewrite_script(script_element) {
   }
 
   if (!has_src) {
-    if (script_text && !is_dynamic)
+    if (!script_text) return;
+    if (!is_dynamic) {
       pending_scripts.push([num, script_element, script_text]);
+      return;
+    }
+    script_element.textContent = parser.rewrite_js(script_text, false, "(dynamic inline script)");
     return;
   }
 
