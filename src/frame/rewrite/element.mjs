@@ -1,7 +1,7 @@
 import * as rewrite from "./index.mjs";
 
 import { parse_css } from "./css.mjs";
-import { ctx, run_script } from "../context.mjs";
+import { run_script, is_ready, page_url } from "../context.mjs";
 
 function is_stylesheet_link(element) {
   if (!(element instanceof HTMLLinkElement)) return false;
@@ -64,7 +64,7 @@ function rewrite_element_single(element) {
   let inline_style = element.getAttribute("style");
   if (inline_style) {
     element.style.cssText = "";
-    let new_css = parse_css(inline_style, ctx.location.href)
+    let new_css = parse_css(inline_style, page_url())
     if (typeof new_css === "string") {
       element.style.cssText = new_css;
     }
@@ -80,6 +80,8 @@ function rewrite_element_single(element) {
 
 export function rewrite_element(element) {
   if (!(element instanceof Element))
+    return;
+  if (!is_ready())
     return;
 
   let promises = [];
