@@ -7,3 +7,7 @@ export * as intersection_observer from "./intersection_observer.mjs";
 export * as diagnostics from "./diagnostics.mjs";
 export * as function from "./function.mjs";
 export * as events from "./events.mjs";
+export * as dom_extra from "./dom_extra.mjs";
+export * as css_dom from "./css_dom.mjs";
+export * as storage from "./storage.mjs";
+export * as document_write from "./document_write.mjs";
