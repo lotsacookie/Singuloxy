@@ -36,7 +36,7 @@ function rewrite_element_single(element) {
     promise = rewrite.form(element);
   else if (element instanceof HTMLIFrameElement)
     promise = rewrite.iframe(element);
-  let promises = [promise];
+  let promises = [promise, rewrite.resource(element)];
 
   for (let j = 0; j < element.attributes.length; j++) {
     let attribute = element.attributes[j].name;
