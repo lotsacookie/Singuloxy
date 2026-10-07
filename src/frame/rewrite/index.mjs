@@ -15,3 +15,4 @@ export {
   rewrite_import_map as import_map,
   dynamic_import as module_dynamic_import
 } from "./module.mjs";
+export { rewrite_resource as resource } from "./resource.mjs";
