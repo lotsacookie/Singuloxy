@@ -4,6 +4,12 @@ const internal = {
   currentScript: null
 }
 
+let write_handler = null;
+
+export function set_write_handler(handler) {
+  write_handler = handler;
+}
+
 class CustomDocument {
   constructor() {
     let keys = get_handler_keys(this);
@@ -34,6 +40,20 @@ class CustomDocument {
     if (root === this) root = document.documentElement;
     return this.__target__.createTreeWalker(root, whatToShow, filter);
   }
+
+  write(...parts) {
+    if (write_handler) write_handler(parts.map(String).join(""));
+  }
+
+  writeln(...parts) {
+    if (write_handler) write_handler(parts.map(String).join("") + "\n");
+  }
+
+  open() {
+    return custom_document.__proxy__;
+  }
+
+  close() {}
 }
 
 export const custom_document = new CustomDocument();
