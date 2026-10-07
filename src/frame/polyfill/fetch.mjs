@@ -1,11 +1,18 @@
 import { ctx } from "../context.mjs";
 import * as network from "../network.mjs";
 
+function abort_error(signal) {
+  if (signal && signal.reason !== undefined) return signal.reason;
+  return new DOMException("The user aborted a request.", "AbortError");
+}
+
 export async function fetch(resource, init={}) {
   let params = {...init};
   let url = resource;
+  let signal = params.signal || null;
   if (resource instanceof Request) {
     url = resource.url;
+    if (!signal) signal = resource.signal;
     params.body = params.body || await resource.blob();
     params.headers = params.headers || Object.fromEntries(resource.headers);
     params.method = params.method || resource.method;
@@ -14,6 +21,7 @@ export async function fetch(resource, init={}) {
       delete params.body;
     }
   }
+  if (signal && signal.aborted) throw abort_error(signal);
   if (params.headers instanceof Headers) {
     params.headers = Object.fromEntries(params.headers);
   }
@@ -28,5 +36,12 @@ export async function fetch(resource, init={}) {
   let array_buffer = await request_obj.arrayBuffer();
   params.body = array_buffer.byteLength ? array_buffer : undefined;
 
-  return await network.fetch(url, params);
+  let request = network.fetch(url, params);
+  if (!signal || typeof signal.addEventListener !== "function") return await request;
+
+  return await new Promise((resolve, reject) => {
+    let on_abort = () => reject(abort_error(signal));
+    signal.addEventListener("abort", on_abort, {once: true});
+    request.then(resolve, reject).finally(() => signal.removeEventListener("abort", on_abort));
+  });
 }
