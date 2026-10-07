@@ -22,6 +22,7 @@ const internal = {
 };
 
 const GETTER_ONLY_ERROR = /only a getter|read[- ]only|Cannot set property/i;
+const OPEN_IN_FRAME = true;
 
 export function unwrap_this(value) {
   if (value === ctx.__proxy__) return globalThis;
@@ -157,6 +158,22 @@ export class CustomCTX {
   get localStorage() {return internal.localStorage}
   get sessionStorage() {return internal.sessionStorage}
   get WebSocket() {return network.WebSocket}
+  get EventSource() {return polyfill.FakeEventSource}
+
+  open(url, target, features) {
+    let text = url === undefined || url === null ? "" : String(url);
+    if (OPEN_IN_FRAME && text !== "" && !is_worker) {
+      try {
+        let resolved = new URL(text, ctx.location.href);
+        if (resolved.protocol === "http:" || resolved.protocol === "https:") {
+          loader.navigate(loader.frame_id, resolved.href);
+          return null;
+        }
+      }
+      catch {}
+    }
+    return Reflect.apply(globalThis.open, globalThis, [url, target, features]);
+  }
 
   eval(js) {
     return run_script(String(js));
