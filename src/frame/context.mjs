@@ -23,12 +23,26 @@ const internal = {
 
 const GETTER_ONLY_ERROR = /only a getter|read[- ]only|Cannot set property/i;
 
+export function unwrap_this(value) {
+  if (value === ctx.__proxy__) return globalThis;
+  let doc = intercept.document;
+  if (doc && doc.__proxy__ && value === doc.__proxy__) return doc.__target__;
+  return value;
+}
+
 function create_func_proxy(target, func) {
-  return new Proxy(func, {
+  let proxy = new Proxy(func, {
     apply: function(func_target, this_arg, args) {
       return Reflect.apply(func_target, target, args);
     }
   });
+  proxy.apply = function(this_arg, args) {
+    return Reflect.apply(func, unwrap_this(this_arg), args);
+  }
+  proxy.call = function(this_arg, ...args) {
+    return Reflect.apply(func, unwrap_this(this_arg), args);
+  }
+  return proxy;
 }
 
 export function get_handler_keys(obj) {
