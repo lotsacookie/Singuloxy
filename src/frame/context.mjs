@@ -24,20 +24,11 @@ const internal = {
 const GETTER_ONLY_ERROR = /only a getter|read[- ]only|Cannot set property/i;
 
 function create_func_proxy(target, func) {
-  let proxy = new Proxy(func, {
+  return new Proxy(func, {
     apply: function(func_target, this_arg, args) {
       return Reflect.apply(func_target, target, args);
     }
   });
-  proxy.apply = function(this_arg, args) {
-    if (this_arg) this_arg = target;
-    return Reflect.apply(func, this_arg, args);
-  }
-  proxy.call = function(this_arg, ...args) {
-    if (this_arg) this_arg = target;
-    return Reflect.apply(func, this_arg, args);
-  }
-  return proxy;
 }
 
 export function get_handler_keys(obj) {
