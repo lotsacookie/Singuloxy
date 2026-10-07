@@ -8,3 +8,4 @@ export { fakeImportScripts, FakeWorker } from "./worker.mjs";
 export { fetch } from "./fetch.mjs";
 export { FakeRequest } from "./request.mjs";
 export { FakeXMLHttpRequest } from "./xhr.mjs";
+export { FakeEventSource } from "./eventsource.mjs";
