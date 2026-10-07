@@ -428,17 +428,32 @@ function note_success(url) {
 
 function note_failure(error, url) {
   if (error?.wisp_paused) return;
-  if (!CONNECTION_ERRORS.test(error_message(error))) return;
+  let message = error_message(error);
+  if (!CONNECTION_ERRORS.test(message)) return;
   let host = host_of(url);
   let now = Date.now();
+  let tls = TLS_ERROR.test(message);
 
-  if (CONNECT_ERROR.test(error_message(error))) note_wisp_failure(url);
+  if (CONNECT_ERROR.test(message)) note_wisp_failure(url);
 
-  let health = host_health.get(host) || {failures: 0, blocked_until: 0};
-  health.failures++;
-  if (health.failures >= HOST_FAIL_THRESHOLD && health.blocked_until <= now) {
-    health.blocked_until = now + HOST_BLOCK_MS;
-    console.warn(`sandstone host: ${host} keeps failing to connect, pausing requests to it for ${HOST_BLOCK_MS / 1000}s. This host is probably blocked by, or incompatible with, the current wisp server.`);
+  let health = host_health.get(host) || {failures: 0, tls_failures: 0, blocked_until: 0};
+  let trip;
+  let block_ms;
+  if (tls) {
+    health.tls_failures++;
+    trip = health.tls_failures >= TLS_HOST_FAIL_THRESHOLD;
+    block_ms = TLS_HOST_BLOCK_MS;
+  }
+  else {
+    health.failures++;
+    trip = health.failures >= HOST_FAIL_THRESHOLD;
+    block_ms = HOST_BLOCK_MS;
+  }
+  if (trip && health.blocked_until <= now) {
+    health.blocked_until = now + block_ms;
+    health.failures = 0;
+    health.tls_failures = 0;
+    console.warn(`sandstone host: ${host} keeps failing to connect, pausing requests to it for ${block_ms / 1000}s. This host is probably blocked by, or incompatible with, the current wisp server.`);
   }
   host_health.set(host, health);
 
@@ -447,27 +462,6 @@ function note_failure(error, url) {
     if (now - time > SHRINK_WINDOW_MS) recent_failures.delete(key);
   }
   if (recent_failures.size >= SHRINK_HOST_COUNT) shrink_concurrency();
-}
-
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-async function wait_for_cooldown() {
-  let remaining = cooldown_until - Date.now();
-  if (remaining > 0) await sleep(remaining + Math.random() * 300);
-}
-
-const host_active = new Map();
-const host_queues = new Map();
-
-function host_of(url) {
-  try {
-    return new URL(url).host;
-  }
-  catch {
-    return "";
-  }
 }
 
 function acquire_host_slot(host) {
