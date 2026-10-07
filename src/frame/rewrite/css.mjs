@@ -8,6 +8,9 @@ const import_regex = /@import\s+(?:url\(\s*(?:"([^"]*)"|'([^']*)'|([^)\s'"]*))\s
 const MAX_IMPORT_DEPTH = 5;
 const ASSET_TIMEOUT_MS = 20 * 1000;
 const BODY_TIMEOUT_MS = 60 * 1000;
+const ASSET_CACHE_LIMIT = 400;
+
+const asset_cache = new Map();
 
 function should_skip(url) {
   if (!url) return true;
@@ -59,6 +62,32 @@ async function fetch_ok(absolute_url) {
   }
 }
 
+function load_asset(absolute_url) {
+  let fetch_url = absolute_url.split("#")[0];
+  let cached = asset_cache.get(fetch_url);
+  if (cached) return cached;
+
+  let task = (async () => {
+    let response = await fetch_ok(fetch_url);
+    if (!response) throw new Error("asset download failed");
+    try {
+      let blob = await with_deadline(response.blob(), BODY_TIMEOUT_MS);
+      return network.create_blob_url(blob, fetch_url);
+    }
+    catch (e) {
+      console.error("sandstone: css asset download failed", fetch_url, e);
+      await cancel_body(response);
+      throw e;
+    }
+  })();
+
+  asset_cache.set(fetch_url, task);
+  task.catch(() => asset_cache.delete(fetch_url));
+  while (asset_cache.size > ASSET_CACHE_LIMIT)
+    asset_cache.delete(asset_cache.keys().next().value);
+  return task;
+}
+
 async function inline_imports(css_str, css_url, depth) {
   let matches = [...css_str.matchAll(import_regex)];
   if (!matches.length) return css_str;
@@ -103,21 +132,8 @@ async function replace_urls(css_str, css_url) {
     let url = (m[1] ?? m[2] ?? m[3] ?? "").trim();
     if (should_skip(url) || is_legacy_font(url) || requests.has(url)) continue;
 
-    requests.set(url, (async () => {
-      let absolute_url = safe_absolute(url, css_url);
-      let fetch_url = absolute_url.split("#")[0];
-      let response = await fetch_ok(fetch_url);
-      if (!response) return absolute_url;
-      try {
-        let blob = await with_deadline(response.blob(), BODY_TIMEOUT_MS);
-        return network.create_blob_url(blob, fetch_url);
-      }
-      catch (e) {
-        console.error("sandstone: css asset download failed", fetch_url, e);
-        await cancel_body(response);
-        return absolute_url;
-      }
-    })());
+    let absolute_url = safe_absolute(url, css_url);
+    requests.set(url, load_asset(absolute_url).catch(() => absolute_url));
   }
   if (!requests.size) return css_str;
 
@@ -132,9 +148,69 @@ async function replace_urls(css_str, css_url) {
   });
 }
 
+function find_image_sets(css_str) {
+  let ranges = [];
+  let finder = /(?:-webkit-)?image-set\(/gi;
+  let match;
+  while ((match = finder.exec(css_str))) {
+    let start = match.index + match[0].length;
+    let depth = 1;
+    let quote = null;
+    let i = start;
+    for (; i < css_str.length && depth > 0; i++) {
+      let ch = css_str[i];
+      if (quote) {
+        if (ch === "\\") i++;
+        else if (ch === quote) quote = null;
+      }
+      else if (ch === '"' || ch === "'") quote = ch;
+      else if (ch === "(") depth++;
+      else if (ch === ")") depth--;
+    }
+    if (depth === 0) {
+      ranges.push([start, i - 1]);
+      finder.lastIndex = i;
+    }
+  }
+  return ranges;
+}
+
+async function replace_image_set_strings(css_str, css_url) {
+  let ranges = find_image_sets(css_str);
+  if (!ranges.length) return css_str;
+
+  let item_regex = /(^|,)(\s*)(["'])((?:\\.|(?!\3)[^\\])*)\3/g;
+  let urls = new Set();
+  for (let [start, end] of ranges) {
+    for (let m of css_str.slice(start, end).matchAll(item_regex)) {
+      let url = m[4].trim();
+      if (!should_skip(url) && !is_legacy_font(url)) urls.add(url);
+    }
+  }
+  if (!urls.size) return css_str;
+
+  let entries = await Promise.all([...urls].map(async (url) => {
+    let absolute_url = safe_absolute(url, css_url);
+    return [url, await load_asset(absolute_url).catch(() => absolute_url)];
+  }));
+  let map = new Map(entries);
+
+  let output = "";
+  let previous = 0;
+  for (let [start, end] of ranges) {
+    output += css_str.slice(previous, start);
+    output += css_str.slice(start, end).replace(item_regex, (match, lead, space, quote, url) => {
+      let replacement = map.get(url.trim());
+      return replacement ? `${lead}${space}"${replacement}"` : match;
+    });
+    previous = end;
+  }
+  return output + css_str.slice(previous);
+}
+
 export function parse_css(css_str, css_url, depth = 0) {
   let has_import = /@import/i.test(css_str);
-  let has_url = /url\(/i.test(css_str);
+  let has_url = /url\(|image-set\(/i.test(css_str);
   if (!has_import && !has_url) return css_str;
 
   return (async () => {
@@ -142,6 +218,7 @@ export function parse_css(css_str, css_url, depth = 0) {
     if (has_import && depth < MAX_IMPORT_DEPTH) {
       result = await inline_imports(result, css_url, depth);
     }
-    return await replace_urls(result, css_url);
+    result = await replace_urls(result, css_url);
+    return await replace_image_set_strings(result, css_url);
   })();
 }
