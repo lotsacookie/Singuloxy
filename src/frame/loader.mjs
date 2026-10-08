@@ -6,10 +6,11 @@ import * as parser from "./parser.mjs";
 import { update_ctx, run_script, run_script_safe, ctx, convert_url, get_cookie_jar } from "./context.mjs";
 import { pending_scripts, script_state, execute_script } from "./rewrite/script.mjs";
 import { pending_modules } from "./rewrite/module.mjs";
-import { install_form_handler } from "./rewrite/form.mjs";
+import { install_form_handler, patch_form_submit } from "./rewrite/form.mjs";
 
-export const navigate = rpc.create_rpc_wrapper(rpc.host, "navigate");
+const navigate_rpc = rpc.create_rpc_wrapper(rpc.host, "navigate");
 export const local_storage = rpc.create_rpc_wrapper(rpc.host, "local_storage");
+export const session_storage = rpc.create_rpc_wrapper(rpc.host, "session_storage");
 export const cookies = rpc.create_rpc_wrapper(rpc.host, "cookies");
 
 export const runtime_src = self.document?.currentScript?.innerHTML;
@@ -23,6 +24,26 @@ export let site_settings = {};
 export let default_settings = {};
 
 const MODULE_TIMEOUT_MS = 15000;
+
+export function flush_state() {
+  try {
+    ctx.localStorage._flush();
+  }
+  catch {}
+  try {
+    ctx.sessionStorage._flush();
+  }
+  catch {}
+  try {
+    get_cookie_jar()._flush();
+  }
+  catch {}
+}
+
+export function navigate(...args) {
+  flush_state();
+  return navigate_rpc(...args);
+}
 
 function eval_script(script_element, script_text) {
   execute_script(script_element, script_text);
@@ -153,6 +174,11 @@ function install_click_handler() {
   globalThis.addEventListener("click", handle_click);
 }
 
+function install_flush_handlers() {
+  globalThis.addEventListener("pagehide", flush_state);
+  globalThis.addEventListener("beforeunload", flush_state);
+}
+
 async function load_html(options) {
   version = options.version;
   is_iframe = options.is_iframe || false;
@@ -165,6 +191,7 @@ async function load_html(options) {
   set_frame_id(options.frame_id);
   get_frame_html();
   update_ctx();
+  patch_form_submit();
 
   globalThis.__dynamic_import__ = rewrite.module_dynamic_import;
 
@@ -182,8 +209,20 @@ async function load_html(options) {
     }
   }
 
+  if (options.session_storage) {
+    for (let [key, value] of options.session_storage) {
+      ctx.sessionStorage.setItem(key, value);
+    }
+  }
+
+  let jar = get_cookie_jar();
   if (options.cookies) {
-    get_cookie_jar().load(options.cookies);
+    jar.load(options.cookies);
+  }
+  if (options.set_cookies) {
+    for (let cookie_string of options.set_cookies) {
+      jar.set(cookie_string, true);
+    }
   }
 
   let parser = new DOMParser();
@@ -216,6 +255,7 @@ async function load_html(options) {
 
   install_click_handler();
   install_form_handler();
+  install_flush_handlers();
 }
 
 async function get_favicon() {
