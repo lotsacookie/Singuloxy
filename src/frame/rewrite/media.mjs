@@ -172,10 +172,12 @@ export function rewrite_media(media_element) {
   let latest_request = 0;
   let allow_error = false;
   let pending = null;
+  let loading_count = 0;
 
   let fetch_src = async (value) => {
     let request_id = ++latest_request;
     raw_set("__src", value);
+    loading_count++;
     try {
       media_url = convert_url(value, ctx.location.href);
       await wait_until_near(media_element);
@@ -192,6 +194,9 @@ export function rewrite_media(media_element) {
       media_element.dispatchEvent(new Event("error"));
       allow_error = false;
       return;
+    }
+    finally {
+      loading_count--;
     }
 
     if (media_element instanceof HTMLSourceElement) {
@@ -228,6 +233,14 @@ export function rewrite_media(media_element) {
         let native = current_src_descriptor.get.call(media_element);
         if (media_url && native.startsWith("blob:")) return media_url;
         return native;
+      }
+    });
+
+    let complete_descriptor = intercept_property(media_element, "complete", {
+      configurable: true,
+      get() {
+        if (loading_count > 0) return false;
+        return complete_descriptor.get.call(media_element);
       }
     });
 
@@ -297,4 +310,4 @@ export function rewrite_media(media_element) {
   }
   
   media_element.src = media_src;
-}
+  }
