@@ -10,6 +10,12 @@ export function set_write_handler(handler) {
   write_handler = handler;
 }
 
+export function swap_current_script(value) {
+  let previous = internal.currentScript;
+  internal.currentScript = value;
+  return previous;
+}
+
 class CustomDocument {
   constructor() {
     let keys = get_handler_keys(this);
@@ -27,7 +33,11 @@ class CustomDocument {
   get baseURI() {return ctx.location.href}
   get documentURI() {return ctx.location.href}
   get defaultView() {return ctx.window}
-  get currentScript() {return internal.currentScript}
+  get currentScript() {
+    if (internal.currentScript) return internal.currentScript;
+    let native = this.__target__ ? this.__target__.currentScript : null;
+    return native || null;
+  }
   set currentScript(value) {internal.currentScript = value}
   get activeElement() {return this.__target__.activeElement || this.__target__.body}
   set activeElement(value) {}
