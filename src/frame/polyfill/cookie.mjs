@@ -23,14 +23,25 @@ export class FakeCookieJar {
     }
   }
 
+  #push() {
+    this.#purge_expired();
+    loader.cookies(loader.frame_id, [...this.#map]);
+  }
+
   #sync() {
     if (this.#pending_sync) return;
     this.#pending_sync = true;
     setTimeout(() => {
-      this.#purge_expired();
-      loader.cookies(loader.frame_id, [...this.#map]);
+      if (!this.#pending_sync) return;
       this.#pending_sync = false;
+      this.#push();
     }, 100);
+  }
+
+  _flush() {
+    if (!this.#pending_sync) return;
+    this.#pending_sync = false;
+    this.#push();
   }
 
   _get_entries() {
