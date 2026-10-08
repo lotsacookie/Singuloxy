@@ -3,6 +3,7 @@ import * as loader from "../loader.mjs";
 import * as parser from "../parser.mjs";
 
 import { ctx, convert_url, intercept_property, proxy_function } from "../context.mjs";
+import { swap_current_script } from "../intercept/document.mjs";
 
 export const pending_scripts = [];
 
@@ -35,8 +36,7 @@ export function should_load(element) {
 }
 
 export function execute_script(script_element, script_text) {
-  let previous = ctx.document.currentScript;
-  ctx.document.currentScript = script_element;
+  let previous = swap_current_script(script_element);
   let script = document.createElement("script");
   script.__rewritten__ = true;
   try {
@@ -48,7 +48,7 @@ export function execute_script(script_element, script_text) {
     console.error("sandstone: script execution failed", e);
   }
   script.remove();
-  ctx.document.currentScript = previous;
+  swap_current_script(previous);
 }
 
 function sleep(ms) {
