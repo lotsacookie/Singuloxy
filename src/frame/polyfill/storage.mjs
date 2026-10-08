@@ -52,15 +52,28 @@ export class FakeStorage {
     })
   }
 
+  #push() {
+    let storage_entries = [...this.#map];
+    if (this.#mode === "local")
+      loader.local_storage(loader.frame_id, storage_entries);
+    else
+      loader.session_storage(loader.frame_id, storage_entries);
+  }
+
   #sync() {
     if (this.#pending_sync) return;
     this.#pending_sync = true;
     setTimeout(() => {
-      let storage_entries = [...this.#map];
-      if (this.#mode === "local")
-        loader.local_storage(loader.frame_id, storage_entries);
+      if (!this.#pending_sync) return;
       this.#pending_sync = false;
+      this.#push();
     }, 100);
+  }
+
+  _flush() {
+    if (!this.#pending_sync) return;
+    this.#pending_sync = false;
+    this.#push();
   }
 
   get length() {
