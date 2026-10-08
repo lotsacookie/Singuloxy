@@ -6,6 +6,10 @@ function abort_error(signal) {
   return new DOMException("The user aborted a request.", "AbortError");
 }
 
+function has_content_type(headers) {
+  return Object.keys(headers).some((name) => name.toLowerCase() === "content-type");
+}
+
 export async function fetch(resource, init={}) {
   let params = {...init};
   let url = resource;
@@ -25,6 +29,9 @@ export async function fetch(resource, init={}) {
   if (params.headers instanceof Headers) {
     params.headers = Object.fromEntries(params.headers);
   }
+  else if (Array.isArray(params.headers)) {
+    params.headers = Object.fromEntries(params.headers);
+  }
   url = (new URL(url, ctx.location.href)).href;
   if (params.body instanceof ReadableStream) {
     params.duplex = "half";
@@ -34,7 +41,16 @@ export async function fetch(resource, init={}) {
 
   let request_obj = new Request("http://127.0.0.1/", params);
   let array_buffer = await request_obj.arrayBuffer();
+  let content_type = request_obj.headers.get("content-type");
   params.body = array_buffer.byteLength ? array_buffer : undefined;
+
+  if (params.body && content_type) {
+    let headers = {...(params.headers || {})};
+    if (!has_content_type(headers)) {
+      headers["Content-Type"] = content_type;
+    }
+    params.headers = headers;
+  }
 
   let request = network.fetch(url, params);
   if (!signal || typeof signal.addEventListener !== "function") return await request;
