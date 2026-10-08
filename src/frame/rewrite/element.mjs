@@ -1,6 +1,7 @@
 import * as rewrite from "./index.mjs";
 
 import { parse_css } from "./css.mjs";
+import { strip_urls } from "./placeholder.mjs";
 import { run_script, is_ready, page_url } from "../context.mjs";
 
 function is_stylesheet_link(element) {
@@ -63,14 +64,17 @@ function rewrite_element_single(element) {
 
   let inline_style = element.getAttribute("style");
   if (inline_style) {
-    element.style.cssText = "";
-    let new_css = parse_css(inline_style, page_url())
+    let new_css = parse_css(inline_style, page_url());
     if (typeof new_css === "string") {
-      element.style.cssText = new_css;
+      if (new_css !== inline_style) element.style.cssText = new_css;
     }
     else {
+      element.style.cssText = strip_urls(inline_style);
+      let placeholder = element.getAttribute("style");
       promises.push((async () => {
-        element.style.cssText = await new_css;
+        let result = await new_css;
+        if (element.getAttribute("style") !== placeholder) return;
+        element.style.cssText = result;
       })());
     }
   }
