@@ -2,6 +2,7 @@ import { ctx, convert_url } from "../context.mjs";
 import * as loader from "../loader.mjs";
 
 let form_handler_installed = false;
+let submit_patched = false;
 
 function build_form_data(form_element, submitter) {
   try {
@@ -85,6 +86,16 @@ export function install_form_handler() {
   if (form_handler_installed) return;
   form_handler_installed = true;
   globalThis.addEventListener("submit", handle_submit);
+}
+
+export function patch_form_submit() {
+  if (submit_patched) return;
+  if (typeof HTMLFormElement === "undefined") return;
+  submit_patched = true;
+  HTMLFormElement.prototype.submit = function () {
+    if (!this.isConnected) return;
+    perform_submit(this, null);
+  };
 }
 
 export function rewrite_form(form_element) {
