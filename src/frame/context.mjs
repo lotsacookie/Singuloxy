@@ -306,6 +306,25 @@ function install_cache_stub() {
   catch {}
 }
 
+function hide_navigation_api() {
+  if (is_worker) return;
+  try {
+    delete globalThis.navigation;
+  }
+  catch {}
+  if ("navigation" in globalThis) {
+    try {
+      Object.defineProperty(globalThis, "navigation", {
+        configurable: true,
+        enumerable: false,
+        writable: true,
+        value: undefined
+      });
+    }
+    catch {}
+  }
+}
+
 export function update_ctx() {
   internal.location = new polyfill.FakeLocation();
   internal.self = ctx.__proxy__;
@@ -316,6 +335,7 @@ export function update_ctx() {
   internal.cookie_jar = new polyfill.FakeCookieJar();
   install_cache_stub();
   install_storage_getters();
+  hide_navigation_api();
 
   globalThis.__ctx__ = ctx.__proxy__;
   globalThis.__get_this__ = ctx.__get_this__;
