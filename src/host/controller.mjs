@@ -67,6 +67,51 @@ function get_frame_bundle() {
   return frame_url;
 }
 
+function navigation_headers(target, referrer, is_post) {
+  let headers = {
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+  };
+  if (typeof navigator !== "undefined" && navigator.userAgent) {
+    headers["User-Agent"] = navigator.userAgent;
+  }
+  if (!referrer) return headers;
+
+  let from;
+  try {
+    from = new URL(referrer);
+  }
+  catch {
+    return headers;
+  }
+  if (from.protocol !== "http:" && from.protocol !== "https:") return headers;
+  if (from.protocol === "https:" && target.protocol === "http:") return headers;
+
+  let from_origin = from.origin;
+  if (from_origin === target.origin) {
+    from.hash = "";
+    from.username = "";
+    from.password = "";
+    headers["Referer"] = from.href;
+  }
+  else {
+    headers["Referer"] = from_origin + "/";
+  }
+  if (is_post) headers["Origin"] = from_origin;
+  return headers;
+}
+
+function extract_set_cookies(response) {
+  let cookies = [];
+  let raw = response?.raw_headers;
+  if (!Array.isArray(raw)) return cookies;
+  for (let pair of raw) {
+    if (Array.isArray(pair) && String(pair[0]).toLowerCase() === "set-cookie") {
+      cookies.push(String(pair[1]));
+    }
+  }
+  return cookies;
+}
+
 export class ProxyFrame {
   constructor() {
     this.url = null;
@@ -92,6 +137,7 @@ export class ProxyFrame {
     this.default_settings = {
       allow_js: true
     };
+    this.session_storage = {};
   }
 
   async wait_for_libcurl() {
@@ -99,7 +145,7 @@ export class ProxyFrame {
     await libcurl.load_wasm();
   }
 
-  async navigate_to(url, form_data=null) {
+  async navigate_to(url, form_data=null, referrer=null) {
     await this.wait_for_libcurl();
     if (!util.is_valid_url(url)) {
       throw TypeError("Invalid URL");
@@ -119,6 +165,7 @@ export class ProxyFrame {
 
     let html = null;
     let error = false;
+    let set_cookies = [];
 
     if (typeof this.special_pages[url] === "string") {
       html = this.special_pages[url];
@@ -141,8 +188,13 @@ export class ProxyFrame {
             options.headers = {"Content-Type": form_data.enctype};
           }
         }
+        options.headers = {
+          ...navigation_headers(new URL(url), referrer, !!form_data),
+          ...(options.headers || {})
+        };
         let response = await network.fetch_page(url, options);
         html = await response.text();
+        set_cookies = extract_set_cookies(response);
         url = response.url;
       }
       catch (e) {
@@ -172,7 +224,9 @@ export class ProxyFrame {
         settings: settings,
         default_settings: this.default_settings,
         local_storage: local_storage[this.url.origin],
+        session_storage: this.session_storage[this.url.origin],
         cookies: cookie_storage[this.url.origin],
+        set_cookies: set_cookies,
         version: version
       });
     }
@@ -186,7 +240,9 @@ export class ProxyFrame {
         settings: settings,
         default_settings: this.default_settings,
         local_storage: undefined,
+        session_storage: undefined,
         cookies: undefined,
+        set_cookies: undefined,
         version: version
       });
     }
@@ -200,7 +256,8 @@ rpc.rpc_handlers["navigate"] = async (frame_id, url, reload=true, form_data=null
   if (!frame) return;
 
   if (reload) {
-    await frame.navigate_to(url, form_data);
+    let referrer = frame.url ? frame.url.href : null;
+    await frame.navigate_to(url, form_data, referrer);
   }
   else {
     frame.url = new URL(url);
@@ -215,6 +272,12 @@ rpc.rpc_handlers["local_storage"] = async (frame_id, entries) => {
   if (window.origin) {
     localStorage.setItem(persist_storage_key, JSON.stringify(local_storage));
   }
+}
+
+rpc.rpc_handlers["session_storage"] = async (frame_id, entries) => {
+  let frame = iframes[frame_id];
+  if (!frame || !frame.url) return;
+  frame.session_storage[frame.url.origin] = entries;
 }
 
 rpc.rpc_handlers["cookies"] = async (frame_id, entries) => {
