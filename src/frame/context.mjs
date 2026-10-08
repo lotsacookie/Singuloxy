@@ -26,6 +26,15 @@ var ready = false;
 const GETTER_ONLY_ERROR = /only a getter|read[- ]only|Cannot set property/i;
 const OPEN_IN_FRAME = true;
 
+const PROTECTED_KEYS = new Set([
+  "Request",
+  "XMLHttpRequest",
+  "URL",
+  "Worker",
+  "WebSocket",
+  "EventSource"
+]);
+
 export function is_ready() {
   return ready === true;
 }
@@ -86,6 +95,7 @@ function find_descriptor(obj, key) {
 }
 
 function assign_handler_value(obj, target, key, value) {
+  if (PROTECTED_KEYS.has(key)) return;
   let descriptor = find_descriptor(obj, key);
   if (!descriptor || "value" in descriptor) {
     obj[key] = value;
@@ -325,6 +335,29 @@ function hide_navigation_api() {
   }
 }
 
+function install_service_worker_stub() {
+  if (is_worker || typeof Navigator === "undefined") return;
+  let stub = {
+    controller: null,
+    ready: new Promise(() => {}),
+    register: () => Promise.reject(new DOMException("Service workers are not available", "SecurityError")),
+    getRegistration: () => Promise.resolve(undefined),
+    getRegistrations: () => Promise.resolve([]),
+    startMessages: () => {},
+    addEventListener: () => {},
+    removeEventListener: () => {},
+    dispatchEvent: () => false
+  };
+  try {
+    Object.defineProperty(Navigator.prototype, "serviceWorker", {
+      configurable: true,
+      enumerable: true,
+      get: () => stub
+    });
+  }
+  catch {}
+}
+
 export function update_ctx() {
   internal.location = new polyfill.FakeLocation();
   internal.self = ctx.__proxy__;
@@ -336,6 +369,7 @@ export function update_ctx() {
   install_cache_stub();
   install_storage_getters();
   hide_navigation_api();
+  install_service_worker_stub();
 
   globalThis.__ctx__ = ctx.__proxy__;
   globalThis.__get_this__ = ctx.__get_this__;
