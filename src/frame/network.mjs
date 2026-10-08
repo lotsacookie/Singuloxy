@@ -89,7 +89,7 @@ function with_browser_headers(url_obj, options) {
     headers["User-Agent"] = navigator.userAgent;
   }
 
-  return {...(options || {}), headers: headers};
+  return {...(options || {}), headers: headers, from_page: from_page_code};
 }
 
 function store_response_cookies(url_obj, fetch_data) {
@@ -110,24 +110,37 @@ function store_response_cookies(url_obj, fetch_data) {
 }
 
 function create_body_stream(stream_id, href) {
+  let finished = false;
   return new ReadableStream({
     async pull(controller) {
+      if (finished) return;
       try {
         let chunk = await rpc_fetch_read(stream_id);
+        if (finished) return;
         if (chunk === null || chunk === undefined) {
-          controller.close();
+          finished = true;
+          try {
+            controller.close();
+          }
+          catch {}
         }
         else {
           controller.enqueue(chunk);
         }
       }
       catch (e) {
+        if (finished) return;
+        finished = true;
         let reason = e?.message ?? String(e);
         console.error("sandstone: download failed mid-transfer:", href, reason);
-        controller.error(new TypeError("Failed to fetch " + href + " (" + reason + ")"));
+        try {
+          controller.error(new TypeError("Failed to fetch " + href + " (" + reason + ")"));
+        }
+        catch {}
       }
     },
     cancel() {
+      finished = true;
       rpc_fetch_cancel(stream_id).catch(() => {});
     }
   }, new CountQueuingStrategy({highWaterMark: 2}));
@@ -362,4 +375,4 @@ export class WebSocket extends EventTarget {
       rpc_ws_close(loader.frame_id, this.#ws_id).catch(() => {});
     }
   }
-}
+  }
