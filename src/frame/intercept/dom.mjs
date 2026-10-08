@@ -1,5 +1,6 @@
 import * as rewrite from "../rewrite/index.mjs";
 import { parse_css } from "../rewrite/css.mjs";
+import { strip_urls } from "../rewrite/placeholder.mjs";
 import { ctx, proxy_function } from "../context.mjs";
 
 const MEDIA_TAGS = new Set(["img", "audio", "video", "source"]);
@@ -140,6 +141,8 @@ function apply_css(style, key, text, commit) {
   }
   let id = (map.get(key) || 0) + 1;
   map.set(key, id);
+
+  commit(strip_urls(text));
 
   result.then((value) => {
     if (map.get(key) === id) commit(value);
