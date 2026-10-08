@@ -7,10 +7,31 @@ const import_regex = /@import\s+(?:url\(\s*(?:"([^"]*)"|'([^']*)'|([^)\s'"]*))\s
 
 const MAX_IMPORT_DEPTH = 5;
 const ASSET_TIMEOUT_MS = 20 * 1000;
+const ASSET_BUDGET_MS = 6 * 1000;
+const MAX_ASSET_FETCHES = 6;
 const BODY_TIMEOUT_MS = 60 * 1000;
 const ASSET_CACHE_LIMIT = 400;
 
 const asset_cache = new Map();
+
+let active_asset_fetches = 0;
+const asset_waiters = [];
+
+function acquire_asset_slot() {
+  if (active_asset_fetches < MAX_ASSET_FETCHES) {
+    active_asset_fetches++;
+    return Promise.resolve();
+  }
+  return new Promise((resolve) => {
+    asset_waiters.push(resolve);
+  });
+}
+
+function release_asset_slot() {
+  let next = asset_waiters.shift();
+  if (next) next();
+  else active_asset_fetches--;
+}
 
 function should_skip(url) {
   if (!url) return true;
@@ -46,9 +67,20 @@ async function cancel_body(response) {
 }
 
 async function fetch_ok(absolute_url) {
+  await acquire_asset_slot();
+  let released = false;
+  let release = () => {
+    if (released) return;
+    released = true;
+    release_asset_slot();
+  };
+
   let response = null;
+  let request = null;
   try {
-    response = await with_deadline(network.fetch(absolute_url), ASSET_TIMEOUT_MS);
+    request = network.fetch(absolute_url);
+    request.then(release, release);
+    response = await with_deadline(request, ASSET_TIMEOUT_MS);
     if (response.ok === false) {
       await cancel_body(response);
       return null;
@@ -56,9 +88,12 @@ async function fetch_ok(absolute_url) {
     return response;
   }
   catch (e) {
-    console.error("sandstone: css fetch failed", absolute_url, e);
+    console.error("sandstone: css asset fetch failed", absolute_url, e);
     await cancel_body(response);
     return null;
+  }
+  finally {
+    if (!request) release();
   }
 }
 
@@ -86,6 +121,17 @@ function load_asset(absolute_url) {
   while (asset_cache.size > ASSET_CACHE_LIMIT)
     asset_cache.delete(asset_cache.keys().next().value);
   return task;
+}
+
+function load_asset_budgeted(absolute_url) {
+  let timer;
+  let fallback = new Promise((resolve) => {
+    timer = setTimeout(() => resolve(absolute_url), ASSET_BUDGET_MS);
+  });
+  return Promise.race([
+    load_asset(absolute_url).catch(() => absolute_url),
+    fallback
+  ]).finally(() => clearTimeout(timer));
 }
 
 async function inline_imports(css_str, css_url, depth) {
@@ -133,7 +179,7 @@ async function replace_urls(css_str, css_url) {
     if (should_skip(url) || is_legacy_font(url) || requests.has(url)) continue;
 
     let absolute_url = safe_absolute(url, css_url);
-    requests.set(url, load_asset(absolute_url).catch(() => absolute_url));
+    requests.set(url, load_asset_budgeted(absolute_url));
   }
   if (!requests.size) return css_str;
 
@@ -191,7 +237,7 @@ async function replace_image_set_strings(css_str, css_url) {
 
   let entries = await Promise.all([...urls].map(async (url) => {
     let absolute_url = safe_absolute(url, css_url);
-    return [url, await load_asset(absolute_url).catch(() => absolute_url)];
+    return [url, await load_asset_budgeted(absolute_url)];
   }));
   let map = new Map(entries);
 
