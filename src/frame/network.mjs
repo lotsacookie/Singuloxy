@@ -3,7 +3,10 @@ import * as loader from "./loader.mjs";
 import * as util from "../util.mjs";
 import { ctx, get_cookie_jar } from "./context.mjs";
 
-export const rpc_fetch = rpc.create_rpc_wrapper(rpc.host, "fetch");
+const NativeResponse = globalThis.Response;
+const NativeHeaders = globalThis.Headers;
+
+export const rpc_fetch= rpc.create_rpc_wrapper(rpc.host, "fetch");
 export const rpc_fetch_read = rpc.create_rpc_wrapper(rpc.host, "fetch_read");
 export const rpc_fetch_cancel = rpc.create_rpc_wrapper(rpc.host, "fetch_cancel");
 export const rpc_ws_new = rpc.create_rpc_wrapper(rpc.host, "ws_new");
@@ -40,7 +43,7 @@ function is_page_origin(url_obj) {
 
 function normalize_headers(headers) {
   if (!headers) return {};
-  if (headers instanceof Headers) return Object.fromEntries(headers);
+  if (headers instanceof NativeHeaders) return Object.fromEntries(headers);
   if (Array.isArray(headers)) return Object.fromEntries(headers);
   return {...headers};
 }
@@ -176,14 +179,14 @@ export async function fetch(url, options) {
   if (fetch_data.mime_type) {
     response_init.headers = {"Content-Type": fetch_data.mime_type};
   }
-  let response = new Response(body, response_init);
+  let response = new NativeResponse(body, response_init);
   for (let key in fetch_data.items) {
     Object.defineProperty(response, key, {
       value: fetch_data.items[key]
     });
   }
 
-  let headers = new Headers();
+  let headers = new NativeHeaders();
   for (let [key, value] of fetch_data.headers) {
     headers.append(key, value);
   }
@@ -375,4 +378,4 @@ export class WebSocket extends EventTarget {
       rpc_ws_close(loader.frame_id, this.#ws_id).catch(() => {});
     }
   }
-  }
+}
