@@ -5,6 +5,7 @@ import { libcurl } from "libcurl.js/bundled";
 export const ws_connections = {};
 export let session = null;
 
+const PAUSING_ENABLED = false;
 const MAX_CONCURRENT_REQUESTS = 16;
 const MIN_CONCURRENT_REQUESTS = 2;
 const GROW_AFTER_SUCCESSES = 10;
@@ -358,7 +359,9 @@ function trip_wisp() {
   wisp.tripped = true;
   wisp.trips++;
   wisp.down_until = now + wisp.backoff;
-  console.warn(`sandstone host: many connections are failing, pausing new requests for ${Math.round(wisp.backoff / 1000)}s (wisp server: ${ws_url})`);
+  console.warn(PAUSING_ENABLED
+    ? `sandstone host: many connections are failing, pausing new requests for ${Math.round(wisp.backoff / 1000)}s (wisp server: ${ws_url})`
+    : `sandstone host: many connections are failing (wisp server: ${ws_url}), requests are not being paused`);
   wisp.backoff = Math.min(wisp.backoff * 2, WISP_BACKOFF_MAX_MS);
   wisp.recent.clear();
   if (wisp.trips >= 2) rotate_wisp();
@@ -387,7 +390,7 @@ function note_wisp_success() {
 }
 
 function wisp_gate(url) {
-  if (!wisp.tripped) return false;
+  if (!PAUSING_ENABLED || !wisp.tripped) return false;
   if (Date.now() < wisp.down_until || wisp.probing) {
     let error = new Error(`Request "${url}" failed with error code 7: waiting for the wisp server to recover`);
     error.wisp_paused = true;
@@ -420,6 +423,7 @@ function release_slot() {
 }
 
 function shrink_concurrency() {
+  if (!PAUSING_ENABLED) return;
   let previous = concurrency_limit;
   concurrency_limit = Math.max(MIN_CONCURRENT_REQUESTS, Math.floor(concurrency_limit / 2));
   successes_since_shrink = 0;
@@ -440,6 +444,7 @@ function grow_concurrency() {
 }
 
 function is_host_blocked(url) {
+  if (!PAUSING_ENABLED) return false;
   let health = host_health.get(host_of(url));
   return !!health && health.blocked_until > Date.now();
 }
@@ -478,7 +483,9 @@ function note_failure(error, url) {
     health.blocked_until = now + block_ms;
     health.failures = 0;
     health.tls_failures = 0;
-    console.warn(`sandstone host: ${host} keeps failing to connect, pausing requests to it for ${block_ms / 1000}s. This host is probably blocked by, or incompatible with, the current wisp server.`);
+    console.warn(PAUSING_ENABLED
+      ? `sandstone host: ${host} keeps failing to connect, pausing requests to it for ${block_ms / 1000}s. This host is probably blocked by, or incompatible with, the current wisp server.`
+      : `sandstone host: ${host} keeps failing to connect. This host is probably blocked by, or incompatible with, the current wisp server.`);
   }
   host_health.set(host, health);
 
@@ -583,7 +590,7 @@ async function fetch_with_retry(url, options, ignore_block = false) {
       let tls = TLS_ERROR.test(message);
       let refused = CONNECT_ERROR.test(message);
       let limit = tls ? MAX_TLS_RETRIES : refused ? MAX_CONNECT_RETRIES : MAX_RETRIES;
-      if (!retryable || attempt >= limit || wisp.tripped && refused) throw e;
+      if (!retryable || attempt >= limit || PAUSING_ENABLED && wisp.tripped && refused) throw e;
       attempt++;
       let base = tls ? 800 : 400;
       let cap = tls ? 6000 : 4000;
