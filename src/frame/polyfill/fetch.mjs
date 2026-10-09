@@ -1,6 +1,15 @@
 import { ctx } from "../context.mjs";
 import * as network from "../network.mjs";
 
+const NativeRequest = globalThis.Request;
+const NativeHeaders = globalThis.Headers;
+
+function is_request_like(value) {
+  if (value instanceof NativeRequest) return true;
+  return value !== null && typeof value === "object" && typeof value.url === "string" &&
+    typeof value.method === "string" && typeof value.blob === "function";
+}
+
 function abort_error(signal) {
   if (signal && signal.reason !== undefined) return signal.reason;
   return new DOMException("The user aborted a request.", "AbortError");
@@ -14,11 +23,11 @@ export async function fetch(resource, init={}) {
   let params = {...init};
   let url = resource;
   let signal = params.signal || null;
-  if (resource instanceof Request) {
+  if (is_request_like(resource)) {
     url = resource.url;
     if (!signal) signal = resource.signal;
     params.body = params.body || await resource.blob();
-    params.headers = params.headers || Object.fromEntries(resource.headers);
+    params.headers = params.headers || Object.fromEntries(resource.headers.entries ? resource.headers.entries() : Object.entries(resource.headers || {}));
     params.method = params.method || resource.method;
 
     if (params.body && params.body.size === 0) {
@@ -26,7 +35,7 @@ export async function fetch(resource, init={}) {
     }
   }
   if (signal && signal.aborted) throw abort_error(signal);
-  if (params.headers instanceof Headers) {
+  if (params.headers instanceof NativeHeaders) {
     params.headers = Object.fromEntries(params.headers);
   }
   else if (Array.isArray(params.headers)) {
@@ -39,7 +48,7 @@ export async function fetch(resource, init={}) {
   if (params.signal)
     delete params.signal;
 
-  let request_obj = new Request("http://127.0.0.1/", params);
+  let request_obj = new NativeRequest("http://127.0.0.1/", params);
   let array_buffer = await request_obj.arrayBuffer();
   let content_type = request_obj.headers.get("content-type");
   params.body = array_buffer.byteLength ? array_buffer : undefined;
