@@ -6,6 +6,7 @@ export const ws_connections = {};
 export let session = null;
 
 const PAUSING_ENABLED = false;
+const WISP_ROTATION_ENABLED = false;
 const MAX_CONCURRENT_REQUESTS = 16;
 const MIN_CONCURRENT_REQUESTS = 2;
 const GROW_AFTER_SUCCESSES = 10;
@@ -338,6 +339,7 @@ function make_session() {
 }
 
 function rotate_wisp() {
+  if (!WISP_ROTATION_ENABLED) return;
   let now = Date.now();
   if (now - wisp.last_rotation < WISP_ROTATE_COOLDOWN_MS) return;
   let candidates = wisp_pool.filter((url) => url !== ws_url);
