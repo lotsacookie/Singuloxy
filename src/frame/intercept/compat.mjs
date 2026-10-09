@@ -873,4 +873,48 @@ function install_indexed_db_fallback() {
   install_key_range_fallback();
 }
 
+function install_blank_iframe_access() {
+  if (typeof globalThis.document === "undefined" || typeof HTMLIFrameElement === "undefined") return;
+  let descriptor = Object.getOwnPropertyDescriptor(HTMLIFrameElement.prototype, "contentWindow");
+  if (!descriptor || !descriptor.get) return;
+
+  let wrappers = new WeakMap();
+  let native_get_attribute = Element.prototype.getAttribute;
+
+  let is_blank = (element) => {
+    try {
+      let read = (name) => Reflect.apply(native_get_attribute, element, [name]);
+      let src = read("src");
+      return !read("__src") && read("__srcdoc") === null && (!src || src === "about:blank");
+    }
+    catch {
+      return false;
+    }
+  };
+
+  Object.defineProperty(HTMLIFrameElement.prototype, "contentWindow", {
+    configurable: true,
+    enumerable: descriptor.enumerable,
+    get: function() {
+      let real = descriptor.get.call(this);
+      if (!real || !is_blank(this)) return real;
+      try {
+        if (real.document) return real;
+      }
+      catch {}
+      if (wrappers.has(real)) return wrappers.get(real);
+      let wrapper = new Proxy(real, {
+        get(target, key) {
+          if (key === "document") return null;
+          let value = Reflect.get(target, key);
+          return typeof value === "function" ? value.bind(target) : value;
+        }
+      });
+      wrappers.set(real, wrapper);
+      return wrapper;
+    }
+  });
+}
+
 install_indexed_db_fallback();
+install_blank_iframe_access();
