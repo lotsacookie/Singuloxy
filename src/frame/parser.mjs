@@ -221,7 +221,7 @@ function gen_rewrite_code(rewrite) {
     if (rewrite.simple || unreadable_vars.includes(rewrite.name)) 
       replacement = `__ctx__.${rewrite.name}`;
     else 
-      replacement  = `(__get_var__(${rewrite.name}, "${rewrite.name}"))`;
+      replacement  = `(__get_var__(typeof ${rewrite.name} === "undefined" ? void 0 : ${rewrite.name}, "${rewrite.name}"))`;
     return [replacement, rewrite.pos + rewrite.name.length];
   }
   else if (rewrite.type === "dynamic_import") {
