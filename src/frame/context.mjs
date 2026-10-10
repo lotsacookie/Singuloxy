@@ -161,15 +161,17 @@ export class CustomCTX {
   set globalThis(value) {internal.globalThis = value}
   get globalThis() {return internal.globalThis}
 
-  get window() {return this.__proxy__}
+  get window() {return is_worker ? undefined : this.__proxy__}
   get origin() {return this.location.origin}
   get document() {return is_worker ? undefined : intercept.document.__proxy__}
   get parent() {
+    if (is_worker) return undefined;
     if (loader.is_iframe)
       return globalThis.parent;
     return this.__proxy__;
   }
   get top() {
+    if (is_worker) return undefined;
     if (loader.is_iframe)
       return globalThis.parent;
     return this.__proxy__;
