@@ -234,7 +234,18 @@ function gen_rewrite_code(rewrite) {
   throw new Error("invalid rewrite type");
 }
 
+function source_url_suffix(label) {
+  if (typeof label !== "string" || !/^https?:\/\//i.test(label)) return "";
+  return "\n//# sourceURL=" + label.replace(/[\s\u0000-\u001f]/g, "");
+}
+
 export function rewrite_js(js, is_module = false, label = "") {
+  let output = rewrite_js_inner(js, is_module, label);
+  let suffix = source_url_suffix(label);
+  return suffix ? output + suffix : output;
+}
+
+function rewrite_js_inner(js, is_module = false, label = "") {
   let ast;
   try {
     ast = parse_js(js, is_module);
