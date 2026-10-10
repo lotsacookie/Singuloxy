@@ -95,16 +95,47 @@ function with_browser_headers(url_obj, options) {
   return {...(options || {}), headers: headers, from_page: from_page_code};
 }
 
+function cookie_domain(set_cookie) {
+  for (let part of String(set_cookie).split(";").slice(1)) {
+    let eq = part.indexOf("=");
+    if (eq === -1) continue;
+    if (part.slice(0, eq).trim().toLowerCase() === "domain") {
+      return part.slice(eq + 1).trim().replace(/^\./, "").toLowerCase();
+    }
+  }
+  return null;
+}
+
+function host_matches(host, domain) {
+  return host === domain || host.endsWith("." + domain);
+}
+
+function page_hostname() {
+  try {
+    return new URL(page_origin()).hostname.toLowerCase();
+  }
+  catch {
+    return null;
+  }
+}
+
 function store_response_cookies(url_obj, fetch_data) {
   try {
-    if (!is_page_origin(url_obj)) return;
+    let page = page_hostname();
+    if (!page) return;
+    let host = url_obj.hostname.toLowerCase();
+    let same_host = host === page;
     let jar = get_cookie_jar();
     if (!jar) return;
     let pairs = fetch_data.items?.raw_headers || fetch_data.headers || [];
     for (let [key, value] of pairs) {
-      if (String(key).toLowerCase() === "set-cookie") {
-        jar.set(String(value), true);
+      if (String(key).toLowerCase() !== "set-cookie") continue;
+      let text = String(value);
+      if (!same_host) {
+        let domain = cookie_domain(text);
+        if (!domain || !domain.includes(".") || !host_matches(host, domain) || !host_matches(page, domain)) continue;
       }
+      jar.set(text, true);
     }
   }
   catch (e) {
