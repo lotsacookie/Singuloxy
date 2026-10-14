@@ -60,20 +60,20 @@ const SEGMENT_LARGE_BYTES = 4 * 1024 * 1024;
 const SEGMENT_MEDIUM_FILE = 128 * 1024 * 1024;
 const SEGMENT_LARGE_FILE = 1024 * 1024 * 1024;
 const SEGMENT_MIN_PARALLEL = 4;
-const SEGMENT_START_PARALLEL = 8;
-const SEGMENT_MAX_PARALLEL = 16;
+const SEGMENT_START_PARALLEL = 4;
+const SEGMENT_MAX_PARALLEL = 8;
 const FALLBACK_MAX_PARALLEL = 6;
 const SEGMENT_LOOKAHEAD_BYTES = 48 * 1024 * 1024;
 const SEGMENT_RETRIES = 5;
 const SEGMENT_MAX_ATTEMPTS = 60;
 const SEGMENT_IDLE_MS = 20 * 1000;
-const MAX_SEGMENT_REQUESTS = 24;
+const MAX_SEGMENT_REQUESTS = 12;
 const TUNE_INTERVAL_MS = 1500;
 const AUTO_SEGMENT_MIN_BYTES = 3 * 1024 * 1024;
 const SPREAD_TTL_MS = 20 * 1000;
 const BULK_MAX_TOTAL = 64;
 const BULK_CACHE_SIZE = 48;
-const BULK_PER_HOST = 24;
+const BULK_PER_HOST = 12;
 const BALANCE_TOP_N = 4;
 const WISP_DOWN_MS = 20 * 1000;
 const JAR_CHECK_MS = 3000;
@@ -322,13 +322,12 @@ function normalize_wisp(url) {
 }
 
 export function set_wisp_pool(urls) {
-  let seen = new Set();
   wisp_pool = [];
   for (let url of Array.isArray(urls) ? urls : []) {
     let normalized = normalize_wisp(url);
-    if (!normalized || seen.has(normalized)) continue;
-    seen.add(normalized);
+    if (!normalized) continue;
     wisp_pool.push(normalized);
+    break;
   }
 }
 
@@ -1991,13 +1990,6 @@ export function clean_ws_connections(id_to_clean) {
 
     delete ws_connections[frame_id];
   }
-}
-
-try {
-  balanced_installed = install_balanced_transport();
-}
-catch (e) {
-  console.warn("sandstone host: could not install the balanced wisp transport:", error_message(e));
 }
 
 libcurl.events.addEventListener("libcurl_load", () => {
