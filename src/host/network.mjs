@@ -54,13 +54,41 @@ const DEFAULT_TEST_URLS = [
   "https://roblox-poc.global.ssl.fastly.net/"
 ];
 
-const SEGMENT_BYTES = 4 * 1024 * 1024;
-const SEGMENT_PARALLEL = 4;
-const SEGMENT_LOOKAHEAD = 5;
-const SEGMENT_RETRIES = 4;
-const SEGMENT_TIMEOUT_MS = 60 * 1000;
-const MAX_SEGMENT_REQUESTS = 12;
-const LARGE_FILE_PATTERN = /\.(zip|7z|rar|tar|pk3|pak|pck|wasm|data|bin|iso|mp4|webm|mkv|unityweb)([?#]|$)|\.part\d{2,}([?#]|$)/i;
+const SEGMENT_PROBE_BYTES = 1024 * 1024;
+const SEGMENT_MEDIUM_BYTES = 2 * 1024 * 1024;
+const SEGMENT_LARGE_BYTES = 4 * 1024 * 1024;
+const SEGMENT_MEDIUM_FILE = 128 * 1024 * 1024;
+const SEGMENT_LARGE_FILE = 1024 * 1024 * 1024;
+const SEGMENT_MIN_PARALLEL = 4;
+const SEGMENT_START_PARALLEL = 8;
+const SEGMENT_MAX_PARALLEL = 16;
+const FALLBACK_MAX_PARALLEL = 6;
+const SEGMENT_LOOKAHEAD_BYTES = 48 * 1024 * 1024;
+const SEGMENT_RETRIES = 5;
+const SEGMENT_MAX_ATTEMPTS = 60;
+const SEGMENT_IDLE_MS = 20 * 1000;
+const MAX_SEGMENT_REQUESTS = 24;
+const TUNE_INTERVAL_MS = 1500;
+const AUTO_SEGMENT_MIN_BYTES = 3 * 1024 * 1024;
+const SPREAD_TTL_MS = 20 * 1000;
+const BULK_MAX_TOTAL = 64;
+const BULK_CACHE_SIZE = 48;
+const BULK_PER_HOST = 24;
+const BALANCE_TOP_N = 4;
+const WISP_DOWN_MS = 20 * 1000;
+const JAR_CHECK_MS = 3000;
+const DEFAULT_WISP_RATE = 512 * 1024;
+const BENCH_BYTES = 2 * 1024 * 1024;
+const BENCH_TIMEOUT_MS = 9 * 1000;
+const BENCH_BATCH = 4;
+const BENCH_MIN_BYTES = 64 * 1024;
+const BENCH_MAX_CANDIDATES = 16;
+const BENCH_TARGETS = [
+  {host: "ipv4.download.thinkbroadband.com", path: "/20MB.zip"},
+  {host: "cachefly.cachefly.net", path: "/10mb.test"},
+  {host: "ash-speed.hetzner.com", path: "/100MB.bin"}
+];
+const LARGE_FILE_PATTERN = /\.(zip|7z|rar|tar|tgz|gz|xz|bz2|pk3|pak|pck|wasm|data|bin|iso|img|mp4|webm|mkv|unityweb|br|apk|exe|dmg|msi|jar|rom|nes|sfc|smc|gba|gbc|gb|nds|n64|z64|v64|nsp|xci|3ds|cia|chd|cue|vpk)([?#]|$)|\.part\d{2,}([?#]|$)/i;
 
 const streams = {};
 const segmented_hosts = new Set();
@@ -79,6 +107,15 @@ const request_queue = [];
 
 let wisp_pool = [];
 let ws_url = null;
+let bulk = null;
+let jar_checked = 0;
+let balanced_installed = false;
+
+const spread_hosts = new Map();
+const spread_off = new Set();
+const wisp_down = new Map();
+const wisp_rates = new Map();
+const watched_connections = new WeakSet();
 
 const wisp = {
   recent: new Map(),
@@ -277,8 +314,299 @@ export function set_websocket(url) {
   libcurl.set_websocket(url);
 }
 
+function normalize_wisp(url) {
+  if (typeof url !== "string") return null;
+  let trimmed = url.trim();
+  if (!/^wss?:\/\//i.test(trimmed)) return null;
+  return trimmed.endsWith("/") ? trimmed : trimmed + "/";
+}
+
 export function set_wisp_pool(urls) {
-  wisp_pool = (Array.isArray(urls) ? urls : []).filter((url) => typeof url === "string" && url);
+  let seen = new Set();
+  wisp_pool = [];
+  for (let url of Array.isArray(urls) ? urls : []) {
+    let normalized = normalize_wisp(url);
+    if (!normalized || seen.has(normalized)) continue;
+    seen.add(normalized);
+    wisp_pool.push(normalized);
+  }
+}
+
+function wisp_connections() {
+  return libcurl.wisp?.wisp_connections || {};
+}
+
+function wisp_load(url) {
+  let connection = wisp_connections()[url];
+  if (!connection) return 0;
+  return Object.keys(connection.active_streams || {}).length;
+}
+
+function mark_wisp_down(url) {
+  wisp_down.set(url, Date.now() + WISP_DOWN_MS);
+}
+
+function watch_wisp_connection(url) {
+  let connection = wisp_connections()[url];
+  if (!connection || watched_connections.has(connection)) return;
+  watched_connections.add(connection);
+  let opened = false;
+  try {
+    connection.addEventListener("open", () => {
+      opened = true;
+      wisp_down.delete(url);
+    });
+    connection.addEventListener("error", () => mark_wisp_down(url));
+    connection.addEventListener("close", () => {
+      if (!opened) mark_wisp_down(url);
+    });
+  }
+  catch {}
+}
+
+function is_spread_host(host) {
+  if (wisp_pool.length < 2 || spread_off.has(host)) return false;
+  let until = spread_hosts.get(host);
+  if (!until) return false;
+  if (until < Date.now()) {
+    spread_hosts.delete(host);
+    return false;
+  }
+  return true;
+}
+
+function pick_wisp(host, fallback) {
+  if (!is_spread_host(host)) return fallback;
+  let now = Date.now();
+  let healthy = wisp_pool.filter((url) => (wisp_down.get(url) || 0) <= now);
+  let candidates = (healthy.length > 0 ? healthy : wisp_pool).slice(0, BALANCE_TOP_N);
+  if (!candidates.includes(fallback) && candidates.length < BALANCE_TOP_N && wisp_pool.includes(fallback)) {
+    candidates.push(fallback);
+  }
+  let best = fallback;
+  let best_cost = Infinity;
+  for (let url of candidates) {
+    let rate = wisp_rates.get(url) || DEFAULT_WISP_RATE;
+    let cost = (wisp_load(url) + 1) / rate * (0.95 + Math.random() * 0.1);
+    if (cost < best_cost) {
+      best_cost = cost;
+      best = url;
+    }
+  }
+  return best;
+}
+
+function install_balanced_transport() {
+  let Base = libcurl.wisp?.WispWebSocket;
+  if (typeof Base !== "function") return false;
+
+  class BalancedWispSocket extends Base {
+    constructor(url, protocols) {
+      let cut = url.lastIndexOf("/");
+      let target = url.slice(cut + 1);
+      let default_wisp = url.slice(0, cut + 1);
+      let host = target.slice(0, target.lastIndexOf(":")).toLowerCase();
+      let chosen = default_wisp;
+      try {
+        chosen = pick_wisp(host, default_wisp);
+      }
+      catch {}
+      super(chosen + target, protocols);
+      this.balanced_wisp = chosen;
+      try {
+        watch_wisp_connection(chosen);
+      }
+      catch {}
+    }
+  }
+
+  libcurl.transport = BalancedWispSocket;
+  return true;
+}
+
+function bench_target(wisp_url, target, timeout_ms) {
+  return new Promise((resolve) => {
+    let started = performance.now();
+    let socket = null;
+    let done = false;
+    let connect_ms = null;
+    let first_ms = null;
+    let body_started = null;
+    let received = 0;
+    let header_bytes = 0;
+    let head = "";
+    let in_body = false;
+    let status = 0;
+
+    let timer = null;
+    let finish = (reason) => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      try {
+        socket?.close();
+      }
+      catch {}
+      let now = performance.now();
+      let body_ms = body_started === null ? 0 : Math.max(now - body_started, 1);
+      let usable = received >= BENCH_MIN_BYTES && (status === 200 || status === 206);
+      resolve({
+        url: wisp_url,
+        target: target.host,
+        ok: usable,
+        reason: reason,
+        status: status,
+        connect_ms: connect_ms === null ? null : Math.round(connect_ms),
+        ttfb_ms: first_ms === null ? null : Math.round(first_ms),
+        bytes: received,
+        rate: usable ? received * 1000 / body_ms : 0
+      });
+    };
+    timer = setTimeout(() => finish("timeout"), timeout_ms);
+
+    try {
+      socket = new libcurl.wisp.WispWebSocket(wisp_url + target.host + ":80");
+    }
+    catch {
+      finish("error");
+      return;
+    }
+    socket.binaryType = "arraybuffer";
+    try {
+      socket.connection?.addEventListener("error", () => finish("connect-failed"));
+      socket.connection?.addEventListener("close", () => finish("closed"));
+    }
+    catch {}
+
+    let decoder = new TextDecoder();
+    socket.onopen = () => {
+      connect_ms = performance.now() - started;
+      let request = [
+        `GET ${target.path} HTTP/1.1`,
+        `Host: ${target.host}`,
+        `Range: bytes=0-${BENCH_BYTES - 1}`,
+        "Accept: */*",
+        "Accept-Encoding: identity",
+        "Connection: close",
+        "",
+        ""
+      ].join("\r\n");
+      try {
+        socket.send(request);
+      }
+      catch {
+        finish("send-failed");
+      }
+    };
+    socket.onclose = () => finish("closed");
+    socket.onmessage = (event) => {
+      let chunk = new Uint8Array(event.data);
+      if (first_ms === null) first_ms = performance.now() - started;
+      if (!in_body) {
+        head += decoder.decode(chunk, {stream: true});
+        let end = head.indexOf("\r\n\r\n");
+        if (end === -1) {
+          if (head.length > 16384) finish("bad-response");
+          return;
+        }
+        let match = /^HTTP\/1\.[01] (\d{3})/.exec(head);
+        status = match ? Number(match[1]) : 0;
+        if (status !== 200 && status !== 206) {
+          finish("status-" + status);
+          return;
+        }
+        in_body = true;
+        body_started = performance.now();
+        header_bytes = new TextEncoder().encode(head.slice(0, end + 4)).byteLength;
+        received += Math.max(0, new TextEncoder().encode(head).byteLength - header_bytes);
+        head = "";
+      }
+      else {
+        received += chunk.byteLength;
+      }
+      if (received >= BENCH_BYTES) finish("done");
+    };
+  });
+}
+
+async function bench_wisp(wisp_url, targets, timeout_ms) {
+  let last = null;
+  for (let target of targets) {
+    let result = await bench_target(wisp_url, target, timeout_ms);
+    if (result.ok) return result;
+    last = result;
+    if (result.reason === "connect-failed" || result.reason === "error") break;
+  }
+  return last || {url: wisp_url, ok: false, reason: "no-targets", bytes: 0, rate: 0};
+}
+
+export async function benchmark_wisps(urls, options = {}) {
+  let candidates = [];
+  let seen = new Set();
+  for (let url of Array.isArray(urls) ? urls : []) {
+    let normalized = normalize_wisp(url);
+    if (!normalized || seen.has(normalized)) continue;
+    seen.add(normalized);
+    candidates.push(normalized);
+  }
+  let limit = options.limit || BENCH_MAX_CANDIDATES;
+  candidates = candidates.slice(0, limit);
+  let targets = Array.isArray(options.targets) && options.targets.length > 0 ? options.targets : BENCH_TARGETS;
+  let timeout_ms = options.timeout_ms || BENCH_TIMEOUT_MS;
+  let batch_size = options.batch || BENCH_BATCH;
+  let on_progress = typeof options.on_progress === "function" ? options.on_progress : null;
+  let results = [];
+
+  for (let index = 0; index < candidates.length; index += batch_size) {
+    let batch = candidates.slice(index, index + batch_size);
+    let batch_results = await Promise.all(batch.map(async (url) => {
+      let result = await bench_wisp(url, targets, timeout_ms);
+      if (on_progress) {
+        try {
+          on_progress(result);
+        }
+        catch {}
+      }
+      return result;
+    }));
+    results.push(...batch_results);
+  }
+
+  for (let result of results) {
+    let latency = (result.connect_ms || 0) + (result.ttfb_ms || 0);
+    result.score = result.ok ? result.rate / (1 + latency / 3000) : 0;
+  }
+  return results;
+}
+
+export async function pick_best_wisp(urls, options = {}) {
+  let results = await benchmark_wisps(urls, options);
+  let ranked = results.filter((result) => result.ok).sort((a, b) => b.score - a.score);
+  let untested = [];
+  let tested = new Set(results.map((result) => result.url));
+  for (let url of Array.isArray(urls) ? urls : []) {
+    let normalized = normalize_wisp(url);
+    if (normalized && !tested.has(normalized) && !untested.includes(normalized)) untested.push(normalized);
+  }
+
+  if (options.verbose !== false) {
+    console.table(results.map((result) => ({
+      wisp: result.url,
+      ok: result.ok,
+      reason: result.reason,
+      connect_ms: result.connect_ms,
+      ttfb_ms: result.ttfb_ms,
+      kb_per_s: Math.round((result.rate || 0) / 1024)
+    })));
+  }
+
+  if (ranked.length === 0) return {best: null, ranked: [], results: results};
+
+  wisp_rates.clear();
+  for (let result of ranked) wisp_rates.set(result.url, Math.max(result.rate, 1024));
+  set_wisp_pool([...ranked.map((result) => result.url), ...untested]);
+  if (options.apply !== false) libcurl.set_websocket(ranked[0].url);
+  return {best: ranked[0].url, ranked: ranked, results: results};
 }
 
 export function get_connection_info() {
@@ -296,7 +624,14 @@ export function get_connection_info() {
     active_requests: active_requests,
     queued_requests: request_queue.length,
     open_streams: Object.keys(streams).length,
-    paused_hosts: paused_hosts
+    paused_hosts: paused_hosts,
+    balanced_transport: balanced_installed,
+    wisp_load: wisp_pool.map((url) => ({
+      url: url,
+      streams: wisp_load(url),
+      kb_per_s: Math.round((wisp_rates.get(url) || 0) / 1024),
+      down: (wisp_down.get(url) || 0) > now
+    }))
   };
 }
 
@@ -558,7 +893,7 @@ function with_timeout(promise, ms, url) {
   return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
 }
 
-async function fetch_with_retry(url, options, ignore_block = false) {
+async function fetch_with_retry(url, options, ignore_block = false, use_session = null) {
   let method = String(options?.method || "GET").toUpperCase();
   let can_retry = method === "GET" || method === "HEAD";
   let attempt = 0;
@@ -571,7 +906,7 @@ async function fetch_with_retry(url, options, ignore_block = false) {
     await wait_for_cooldown();
     try {
       let response = await with_timeout(
-        session.fetch(url, options ? {...options} : undefined),
+        (use_session || session).fetch(url, options ? {...options} : undefined),
         REQUEST_TIMEOUT_MS,
         url
       );
@@ -673,128 +1008,440 @@ function expected_length(response, method) {
   return Number.isFinite(length) && length > 0 ? length : null;
 }
 
-async function download_segment(url, options, host, start, end, seed) {
-  let expected = end - start + 1;
-  let response = seed;
-  let last_error;
+function content_range_info(response) {
+  let match = /bytes\s+(\d+)-(\d+)\/(\d+|\*)/i.exec(response.headers.get("content-range") || "");
+  if (!match) return null;
+  return {
+    start: Number(match[1]),
+    end: Number(match[2]),
+    total: match[3] === "*" ? null : Number(match[3])
+  };
+}
 
-  await segment_semaphore.acquire();
+function segment_size_for(total) {
+  if (total >= SEGMENT_LARGE_FILE) return SEGMENT_LARGE_BYTES;
+  if (total >= SEGMENT_MEDIUM_FILE) return SEGMENT_MEDIUM_BYTES;
+  return SEGMENT_PROBE_BYTES;
+}
+
+function segment_target(url, options, response) {
+  let final = typeof response?.url === "string" ? response.url : "";
+  if (!response?.redirected || !/^https?:\/\//i.test(final) || final === url) return {url: url, options: options};
+  let cross_origin;
   try {
-    for (let attempt = 0; attempt <= SEGMENT_RETRIES; attempt++) {
-      try {
-        if (!response) {
-          await acquire_host_slot(host);
-          await acquire_slot();
-          try {
-            response = await fetch_with_retry(url, ranged(options, start, end));
-          }
-          finally {
-            release_slot();
-            release_host_slot(host);
-          }
-          if (response.status !== 206) {
-            let status = response.status;
-            discard_response(response);
-            response = null;
-            throw new Error(`Request failed with error code 22: server did not honor the range request (status ${status})`);
-          }
-        }
+    cross_origin = new URL(final).origin !== new URL(url).origin;
+  }
+  catch {
+    return {url: url, options: options};
+  }
+  if (!cross_origin) return {url: final, options: options};
+  let headers = {...(options?.headers || {})};
+  for (let key of Object.keys(headers)) {
+    let lower = key.toLowerCase();
+    if (lower === "authorization" || lower === "proxy-authorization" || lower === "cookie") delete headers[key];
+  }
+  return {url: final, options: {...(options || {}), headers: headers}};
+}
 
-        let current = response;
-        response = null;
-        let bytes;
-        try {
-          bytes = new Uint8Array(await with_timeout(current.arrayBuffer(), SEGMENT_TIMEOUT_MS, url));
+function current_jar() {
+  try {
+    return session.export_cookies?.() || "";
+  }
+  catch {
+    return "";
+  }
+}
+
+function create_bulk(jar) {
+  try {
+    let created = new libcurl.HTTPSession(jar ? {enable_cookies: true, cookie_jar: jar} : {enable_cookies: true});
+    created.set_connections(BULK_MAX_TOTAL, BULK_CACHE_SIZE, BULK_PER_HOST);
+    return {session: created, jar: jar, users: 0, retired: false};
+  }
+  catch (e) {
+    console.warn("sandstone host: could not create a download session, using the shared one:", error_message(e));
+    return {session: null, jar: jar, users: 0, retired: false};
+  }
+}
+
+function close_bulk(lease) {
+  let target = lease.session;
+  lease.session = null;
+  if (!target) return;
+  try {
+    target.close();
+  }
+  catch {}
+}
+
+function retire_bulk(lease) {
+  lease.retired = true;
+  if (bulk === lease) bulk = null;
+  if (lease.users === 0) close_bulk(lease);
+}
+
+function acquire_bulk() {
+  let now = Date.now();
+  if (bulk && bulk.users === 0 && now - jar_checked > JAR_CHECK_MS) {
+    jar_checked = now;
+    if (bulk.jar !== current_jar()) retire_bulk(bulk);
+  }
+  if (!bulk) {
+    bulk = create_bulk(current_jar());
+    jar_checked = now;
+  }
+  bulk.users++;
+  return bulk;
+}
+
+function release_bulk(lease) {
+  if (!lease) return;
+  lease.users = Math.max(0, lease.users - 1);
+  if (lease.retired && lease.users === 0) close_bulk(lease);
+}
+
+function release_seed(seed) {
+  if (!seed) return;
+  discard_response(seed.response);
+  release_bulk(seed.lease);
+  seed.lease = null;
+}
+
+async function open_segment(ctx, job, controller, lease) {
+  let start = job.start + job.received;
+  let end = job.start + job.length - 1;
+  let request_options = {...ranged(ctx.options, start, end), signal: controller.signal};
+  let response;
+
+  await acquire_host_slot(ctx.host);
+  try {
+    await acquire_slot();
+    try {
+      response = await fetch_with_retry(ctx.url, request_options, false, lease.session);
+    }
+    finally {
+      release_slot();
+    }
+  }
+  finally {
+    release_host_slot(ctx.host);
+  }
+
+  if (response.status !== 206) {
+    let status = response.status;
+    discard_response(response);
+    let error = new Error(`Request failed with error code 22: server did not honor the range request (status ${status})`);
+    error.status = status;
+    throw error;
+  }
+  let range = content_range_info(response);
+  if (range && (range.start !== start || (range.total !== null && range.total !== ctx.total))) {
+    discard_response(response);
+    throw new Error("Request failed with error code 22: server returned a different range than requested");
+  }
+  return response;
+}
+
+async function read_body_into(job, response, limit, controller, meter) {
+  let reader = response.body && typeof response.body.getReader === "function" ? response.body.getReader() : null;
+
+  if (!reader) {
+    let bytes = new Uint8Array(await with_timeout(response.arrayBuffer(), SEGMENT_IDLE_MS * 3, response.url || ""));
+    let take = Math.min(bytes.byteLength, limit);
+    job.buffer.set(take === bytes.byteLength ? bytes : bytes.subarray(0, take), job.received);
+    job.received += take;
+    meter.bytes += take;
+    return;
+  }
+
+  job.cancel_read = () => {
+    try {
+      reader.cancel().catch(() => {});
+    }
+    catch {}
+  };
+
+  let got = 0;
+  let ended = false;
+  try {
+    while (got < limit) {
+      let timer = null;
+      let result = await Promise.race([
+        reader.read(),
+        new Promise((resolve, reject) => {
+          timer = setTimeout(() => {
+            reject(new Error(`Request failed with error code 28: no data received for ${SEGMENT_IDLE_MS / 1000}s`));
+          }, SEGMENT_IDLE_MS);
+        })
+      ]).finally(() => clearTimeout(timer));
+
+      if (result.done) {
+        ended = true;
+        break;
+      }
+      let chunk = result.value;
+      let take = Math.min(chunk.byteLength, limit - got);
+      job.buffer.set(take === chunk.byteLength ? chunk : chunk.subarray(0, take), job.received);
+      job.received += take;
+      got += take;
+      meter.bytes += take;
+    }
+  }
+  catch (e) {
+    try {
+      controller.abort();
+    }
+    catch {}
+    job.cancel_read();
+    throw e;
+  }
+  finally {
+    if (!ended) job.cancel_read?.();
+    job.cancel_read = null;
+  }
+}
+
+async function run_segment(ctx, job) {
+  await segment_semaphore.acquire();
+  let failures = 0;
+  let attempts = 0;
+
+  try {
+    while (true) {
+      if (ctx.cancelled) throw new Error("Request failed with error code 18: download was cancelled");
+
+      let before = job.received;
+      let controller = new AbortController();
+      job.controller = controller;
+      let seed = job.seed;
+      job.seed = null;
+      let lease = null;
+
+      try {
+        let response = seed ? seed.response : null;
+        if (!response) {
+          lease = acquire_bulk();
+          if (!lease.session) {
+            ctx.max_parallel = FALLBACK_MAX_PARALLEL;
+            ctx.target = Math.min(ctx.target, FALLBACK_MAX_PARALLEL);
+          }
+          response = await open_segment(ctx, job, controller, lease);
         }
-        catch (e) {
-          discard_response(current);
-          throw e;
-        }
-        if (bytes.byteLength !== expected) {
-          throw new Error(`Request failed with error code 18: segment returned ${bytes.byteLength} of ${expected} bytes`);
-        }
-        return bytes;
+        await read_body_into(job, response, job.length - job.received, controller, ctx.meter);
+        if (job.received >= job.length) return job.buffer;
+        throw new Error(`Request failed with error code 18: segment returned ${job.received} of ${job.length} bytes`);
       }
       catch (e) {
-        last_error = e;
-        if (attempt >= SEGMENT_RETRIES) break;
-        await sleep(Math.min(300 * 2 ** attempt, 3000) + Math.random() * 250);
+        try {
+          controller.abort();
+        }
+        catch {}
+        if (ctx.cancelled) throw e;
+
+        attempts++;
+        let progressed = job.received > before;
+        failures = progressed ? 0 : failures + 1;
+        ctx.meter.errors++;
+
+        let denied = e?.status === 401 || e?.status === 403 || e?.status === 410;
+        if (denied && wisp_pool.length > 1 && !spread_off.has(ctx.host)) {
+          for (let name of ctx.hosts) spread_off.add(name);
+          if (bulk) retire_bulk(bulk);
+          failures = Math.max(0, failures - 1);
+        }
+
+        if (failures > SEGMENT_RETRIES || attempts > SEGMENT_MAX_ATTEMPTS) throw new Error(error_message(e));
+        await sleep(Math.min(250 * 2 ** Math.min(failures, 5), 4000) + Math.random() * 250);
+      }
+      finally {
+        if (seed) release_bulk(seed.lease);
+        if (lease) release_bulk(lease);
       }
     }
   }
   finally {
+    job.controller = null;
     segment_semaphore.release();
   }
-
-  throw new Error(error_message(last_error));
 }
 
-function create_segmented_reader(url, options, host, total, first_response) {
-  let segment_count = Math.ceil(total / SEGMENT_BYTES);
-  let segments = new Map();
+function tune_parallelism(ctx, consumer_limited) {
+  let meter = ctx.meter;
+  let now = performance.now();
+  let elapsed = now - meter.since;
+  if (elapsed < TUNE_INTERVAL_MS) return;
+
+  let rate = meter.bytes * 1000 / elapsed;
+  let errors = meter.errors;
+  meter.bytes = 0;
+  meter.errors = 0;
+  meter.since = now;
+  if (consumer_limited) return;
+
+  let improved = meter.last_rate === 0 ? rate > 0 : rate > meter.last_rate * 1.08;
+  if (errors > 1 || (meter.last_rate > 0 && rate < meter.last_rate * 0.5)) {
+    ctx.target = Math.max(SEGMENT_MIN_PARALLEL, ctx.target - 2);
+    meter.action = "down";
+    meter.hold = 2;
+  }
+  else if (meter.action === "up" && !improved) {
+    ctx.target = Math.max(SEGMENT_MIN_PARALLEL, ctx.target - 2);
+    meter.action = "hold";
+    meter.hold = 3;
+  }
+  else if (meter.hold > 0) {
+    meter.hold--;
+    meter.action = "hold";
+  }
+  else if (ctx.target < ctx.max_parallel && rate > 0) {
+    ctx.target = Math.min(ctx.max_parallel, ctx.target + 2);
+    meter.action = "up";
+  }
+  else {
+    meter.action = "hold";
+  }
+  ctx.target = Math.min(ctx.target, ctx.max_parallel);
+  meter.last_rate = rate;
+}
+
+function create_segmented_reader(url, options, total, seeds, original_url = url) {
+  let segment_bytes = segment_size_for(total);
+  let lookahead = Math.max(Math.floor(SEGMENT_LOOKAHEAD_BYTES / segment_bytes), SEGMENT_MAX_PARALLEL + 2);
+  let hosts = [...new Set([host_of(url), host_of(original_url)])];
+  let ctx = {
+    url: url,
+    options: options,
+    host: hosts[0],
+    hosts: hosts,
+    total: total,
+    cancelled: false,
+    target: SEGMENT_START_PARALLEL,
+    max_parallel: SEGMENT_MAX_PARALLEL,
+    meter: {bytes: 0, since: performance.now(), last_rate: 0, errors: 0, action: "hold", hold: 0}
+  };
+  let jobs = new Map();
+  let pending_seeds = Array.isArray(seeds) ? [...seeds] : [];
+  let next_offset = 0;
   let next_start = 0;
   let next_deliver = 0;
   let in_flight = 0;
-  let cancelled = false;
-  let initial = first_response;
+
+  let make_job = () => {
+    let seed = pending_seeds.shift() || null;
+    let wanted = seed ? seed.length : segment_bytes;
+    let length = Math.min(wanted, total - next_offset);
+    let job = {
+      index: next_start,
+      start: next_offset,
+      length: length,
+      received: 0,
+      buffer: new Uint8Array(length),
+      seed: seed,
+      controller: null,
+      cancel_read: null,
+      promise: null
+    };
+    next_offset += length;
+    return job;
+  };
 
   let launch = () => {
-    while (
-      !cancelled &&
-      next_start < segment_count &&
-      in_flight < SEGMENT_PARALLEL &&
-      next_start - next_deliver < SEGMENT_LOOKAHEAD
-    ) {
-      let index = next_start++;
-      let start = index * SEGMENT_BYTES;
-      let end = Math.min(start + SEGMENT_BYTES, total) - 1;
-      let seed = null;
-      if (index === 0) {
-        seed = initial;
-        initial = null;
-      }
+    if (ctx.cancelled) return;
+    let until = Date.now() + SPREAD_TTL_MS;
+    while (next_offset < total && in_flight < ctx.target && next_start - next_deliver < lookahead) {
+      let job = make_job();
+      next_start++;
       in_flight++;
-      let promise = download_segment(url, options, host, start, end, seed).finally(() => {
+      for (let name of ctx.hosts) spread_hosts.set(name, until);
+      job.promise = run_segment(ctx, job).finally(() => {
         in_flight--;
         launch();
       });
-      promise.catch(() => {});
-      segments.set(index, promise);
+      job.promise.catch(() => {});
+      jobs.set(job.index, job);
     }
+    tune_parallelism(ctx, next_offset < total && next_start - next_deliver >= lookahead);
+  };
+
+  let stop = () => {
+    ctx.cancelled = true;
+    for (let job of jobs.values()) {
+      try {
+        job.controller?.abort();
+      }
+      catch {}
+      job.cancel_read?.();
+      release_seed(job.seed);
+      job.seed = null;
+    }
+    jobs.clear();
+    for (let seed of pending_seeds) release_seed(seed);
+    pending_seeds = [];
   };
 
   return {
     read: async () => {
-      if (cancelled || next_deliver >= segment_count) {
+      if (ctx.cancelled || (next_offset >= total && next_deliver >= next_start)) {
         return {done: true, value: undefined};
       }
       launch();
-      let index = next_deliver;
-      let promise = segments.get(index);
-      if (!promise) throw new Error("segment scheduling stalled");
+      let job = jobs.get(next_deliver);
+      if (!job) throw new Error("segment scheduling stalled");
 
       let bytes;
       try {
-        bytes = await promise;
+        bytes = await job.promise;
       }
       catch (e) {
-        cancelled = true;
-        segments.clear();
+        stop();
         throw e;
       }
-      segments.delete(index);
+      jobs.delete(next_deliver);
       next_deliver++;
       launch();
       return {done: false, value: bytes};
     },
     cancel: async () => {
-      cancelled = true;
-      segments.clear();
-      if (initial) {
-        discard_response(initial);
-        initial = null;
-      }
+      stop();
     }
+  };
+}
+
+async function try_segment_upgrade(url, options, response, method) {
+  let total = expected_length(response, method);
+  if (!total || total < AUTO_SEGMENT_MIN_BYTES) return null;
+  if (!(response.headers.get("accept-ranges") || "").toLowerCase().includes("bytes")) return null;
+
+  let segment_bytes = segment_size_for(total);
+  let first_length = Math.min(segment_bytes, total);
+  if (first_length >= total) return null;
+  let second_length = Math.min(segment_bytes, total - first_length);
+
+  let target = segment_target(url, options, response);
+  let lease = acquire_bulk();
+  let probe = null;
+  try {
+    probe = await fetch_with_retry(target.url, ranged(target.options, first_length, first_length + second_length - 1), false, lease.session);
+  }
+  catch {
+    probe = null;
+  }
+
+  let range = probe ? content_range_info(probe) : null;
+  let valid = !!probe && probe.status === 206 && is_identity(probe) && !!range && range.start === first_length && range.total === total;
+  if (!valid) {
+    if (probe) discard_response(probe);
+    release_bulk(lease);
+    return null;
+  }
+  return {
+    total: total,
+    url: target.url,
+    options: target.options,
+    seeds: [
+      {response: response, length: first_length, lease: null},
+      {response: probe, length: second_length, lease: lease}
+    ]
   };
 }
 
@@ -965,7 +1612,7 @@ rpc_handlers["fetch"] = async function(url, options) {
 
     if (can_segment && (segmented_hosts.has(host) || LARGE_FILE_PATTERN.test(url))) {
       try {
-        let attempt = await fetch_with_retry(url, ranged(options, 0, SEGMENT_BYTES - 1));
+        let attempt = await fetch_with_retry(url, ranged(options, 0, SEGMENT_PROBE_BYTES - 1));
         if (attempt.status === 206) {
           if (usable_segmented(attempt)) {
             response = attempt;
@@ -999,7 +1646,7 @@ rpc_handlers["fetch"] = async function(url, options) {
           segmented_hosts.add(host);
           console.warn("sandstone host: transfer cut off, switching to segmented download:", url, error_message(e));
           try {
-            let attempt = await fetch_with_retry(url, ranged(options, 0, SEGMENT_BYTES - 1));
+            let attempt = await fetch_with_retry(url, ranged(options, 0, SEGMENT_PROBE_BYTES - 1));
             if (usable_segmented(attempt)) {
               response = attempt;
               segmented = true;
@@ -1024,6 +1671,31 @@ rpc_handlers["fetch"] = async function(url, options) {
       }
     }
 
+    let segment_total = null;
+    let segment_seeds = null;
+    let segment_url = url;
+    let segment_options = options;
+
+    if (segmented) {
+      segment_total = content_range_total(response);
+      let range = content_range_info(response);
+      let first_length = range ? range.end - range.start + 1 : SEGMENT_PROBE_BYTES;
+      segment_seeds = [{response: response, length: Math.min(first_length, segment_total), lease: null}];
+      let target = segment_target(url, options, response);
+      segment_url = target.url;
+      segment_options = target.options;
+    }
+    else if (can_segment && response.status === 200) {
+      let upgrade = await try_segment_upgrade(url, options, response, method);
+      if (upgrade) {
+        segmented = true;
+        segment_total = upgrade.total;
+        segment_seeds = upgrade.seeds;
+        segment_url = upgrade.url;
+        segment_options = upgrade.options;
+      }
+    }
+
     let keys = ["ok", "redirected", "status", "statusText", "type", "url", "raw_headers"];
     let payload = {
       headers: [],
@@ -1040,7 +1712,6 @@ rpc_handlers["fetch"] = async function(url, options) {
     payload.mime_type = (response.headers.get("content-type") || "").split(";")[0].trim();
 
     if (segmented) {
-      let total = content_range_total(response);
       payload.items.ok = true;
       payload.items.status = 200;
       payload.items.statusText = "OK";
@@ -1048,15 +1719,22 @@ rpc_handlers["fetch"] = async function(url, options) {
         let name = String(key).toLowerCase();
         return name !== "content-range" && name !== "content-length";
       });
-      payload.headers.push(["content-length", String(total)]);
+      payload.headers.push(["content-length", String(segment_total)]);
 
       let stream_id = Math.random() + "";
       streams[stream_id] = new_stream({
-        reader: create_segmented_reader(url, options ? {...options} : undefined, host, total, response),
+        reader: create_segmented_reader(
+          segment_url,
+          segment_options ? {...segment_options} : undefined,
+          segment_total,
+          segment_seeds,
+          url
+        ),
         owner: owner,
         url: url,
         options: options ? {...options} : undefined,
-        expected: total
+        expected: segment_total,
+        can_resume: true
       });
       payload.stream_id = stream_id;
       enforce_stream_cap();
@@ -1313,6 +1991,13 @@ export function clean_ws_connections(id_to_clean) {
 
     delete ws_connections[frame_id];
   }
+}
+
+try {
+  balanced_installed = install_balanced_transport();
+}
+catch (e) {
+  console.warn("sandstone host: could not install the balanced wisp transport:", error_message(e));
 }
 
 libcurl.events.addEventListener("libcurl_load", () => {
