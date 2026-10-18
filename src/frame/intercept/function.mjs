@@ -1,4 +1,5 @@
 import { rewrite_js } from "../parser.mjs";
+import { unwrap_this } from "../context.mjs";
 
 const NativeFunction = Function;
 
@@ -34,3 +35,35 @@ const FunctionProxy = new Proxy(NativeFunction, {
 
 globalThis.Function = FunctionProxy;
 NativeFunction.prototype.constructor = FunctionProxy;
+
+const native_cache = new WeakMap();
+const native_to_string = NativeFunction.prototype.__toString;
+
+function is_native_function(func) {
+  let cached = native_cache.get(func);
+  if (cached !== undefined) return cached;
+  let result = false;
+  try {
+    result = /\{\s*\[native code\]\s*\}\s*$/.test(native_to_string.call(func));
+  }
+  catch {}
+  native_cache.set(func, result);
+  return result;
+}
+
+function unwrap_native_this(func, this_arg) {
+  if (typeof func !== "function" || this_arg === null || (typeof this_arg !== "object" && typeof this_arg !== "function")) return this_arg;
+  let unwrapped = unwrap_this(this_arg);
+  if (unwrapped === this_arg) return this_arg;
+  return is_native_function(func) ? unwrapped : this_arg;
+}
+
+const native_apply = NativeFunction.prototype.apply;
+
+NativeFunction.prototype.call = function(this_arg, ...args) {
+  return Reflect.apply(this, unwrap_native_this(this, this_arg), args);
+};
+
+NativeFunction.prototype.apply = function(this_arg, args) {
+  return Reflect.apply(native_apply, this, [unwrap_native_this(this, this_arg), args]);
+};
