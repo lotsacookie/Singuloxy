@@ -5,6 +5,11 @@ const internal = {
 }
 
 let write_handler = null;
+let ready_state = "complete";
+
+export function set_ready_state(value) {
+  ready_state = value;
+}
 
 export function set_write_handler(handler) {
   write_handler = handler;
@@ -41,6 +46,7 @@ class CustomDocument {
   set currentScript(value) {internal.currentScript = value}
   get activeElement() {return this.__target__.activeElement || this.__target__.body}
   set activeElement(value) {}
+  get readyState() {return ready_state}
 
   createElement(tag_name, options) {
     return this.__target__.createElement(tag_name, options);

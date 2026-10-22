@@ -7,6 +7,7 @@ import { update_ctx, run_script, run_script_safe, ctx, convert_url, document_bas
 import { pending_scripts, script_state, execute_script } from "./rewrite/script.mjs";
 import { pending_modules } from "./rewrite/module.mjs";
 import { install_form_handler, patch_form_submit } from "./rewrite/form.mjs";
+import { set_ready_state } from "./intercept/document.mjs";
 
 const navigate_rpc = rpc.create_rpc_wrapper(rpc.host, "navigate");
 export const local_storage = rpc.create_rpc_wrapper(rpc.host, "local_storage");
@@ -177,6 +178,32 @@ function install_flush_handlers() {
   globalThis.addEventListener("beforeunload", flush_state);
 }
 
+function fire_document_event(type, bubbles = false) {
+  try {
+    ctx.document.dispatchEvent(new Event(type, {bubbles: bubbles}));
+  }
+  catch (e) {
+    console.error("sandstone: event dispatch failed", type, e);
+  }
+}
+
+function settle() {
+  return new Promise((resolve) => {
+    let finish = () => setTimeout(resolve, 0);
+    try {
+      let channel = new MessageChannel();
+      channel.port1.onmessage = () => {
+        channel.port1.close();
+        finish();
+      };
+      channel.port2.postMessage(0);
+    }
+    catch {
+      finish();
+    }
+  });
+}
+
 async function load_html(options) {
   version = options.version;
   is_iframe = options.is_iframe || false;
@@ -223,6 +250,8 @@ async function load_html(options) {
     }
   }
 
+  set_ready_state("loading");
+
   let parser = new DOMParser();
   let html = parser.parseFromString(options.html, "text/html");  
   
@@ -252,14 +281,19 @@ async function load_html(options) {
   }
 
   is_loaded = true;
-  ctx.document.dispatchEvent(new Event("DOMContentLoaded"));
-  ctx.document.dispatchEvent(new Event("readystatechange"));
-  ctx.document.dispatchEvent(new Event("load"));
-  ctx.window.dispatchEvent(new Event("load"));
-
   install_click_handler();
   install_form_handler();
   install_flush_handlers();
+
+  set_ready_state("interactive");
+  fire_document_event("readystatechange");
+  fire_document_event("DOMContentLoaded", true);
+
+  await settle();
+
+  set_ready_state("complete");
+  fire_document_event("readystatechange");
+  ctx.window.dispatchEvent(new Event("load"));
 }
 
 async function get_favicon() {

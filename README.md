@@ -40,11 +40,16 @@ This is at a very early stage of development and lacks support for most web APIs
 - Anchor tags 
 - HTML redirects
 - HTML forms
+- Cookies
+- ES modules
+- Document lifecycle (`readyState`, `DOMContentLoaded`, `load`)
 
 ### Notable Unimplemented Features
-- Cookies
-- ES6 modules
 - HTTP request caching
+- Service workers (stubbed on purpose)
+
+### Known Issues
+- React hydration errors such as `Minified React error #421` on the Spotify web player. `DOMContentLoaded` and `load` used to fire synchronously right after the page scripts ran, and `document.readyState` never reflected loading. Both now follow the real browser lifecycle, which removes one known trigger. This has not been verified against Spotify in a live browser yet.
 
 ## Usage
 ### Building
