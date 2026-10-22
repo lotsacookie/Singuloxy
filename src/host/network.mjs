@@ -43,6 +43,7 @@ const CONNECT_ERROR = /error code 7\b/;
 const CONNECTION_ERRORS = /error code (7|35)\b/;
 const PRE_REQUEST_ERRORS = /error code (7|35)\b/;
 const PARTIAL_ERRORS = /error code (18|56)\b/;
+const CERT_ERROR = /error code 60\b/;
 const TIMEOUT = Symbol("timeout");
 
 const DEFAULT_TEST_URLS = [
@@ -892,6 +893,47 @@ function with_timeout(promise, ms, url) {
   return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
 }
 
+const cert_diagnosed = new Set();
+
+// Error 60 only says "peer verification failed". Re-run one verbose request per
+// host and print libcurl's own explanation (e.g. BADCERT_NOT_TRUSTED, BADCERT_EXPIRED,
+// BADCERT_FUTURE for a wrong device clock, BADCERT_BAD_MD / BAD_PK for weak signatures).
+function diagnose_certificate(url) {
+  let host;
+  try {
+    host = new URL(url).host;
+  }
+  catch {
+    return;
+  }
+  if (cert_diagnosed.has(host) || !session) return;
+  cert_diagnosed.add(host);
+
+  (async () => {
+    let lines = [];
+    let previous = libcurl.stderr;
+    libcurl.stderr = (text) => {
+      lines.push(String(text));
+      try {
+        previous?.(text);
+      }
+      catch {}
+    };
+    try {
+      await with_timeout(session.fetch(`https://${host}/`, {method: "HEAD", _libcurl_verbose: 1}), 15000, url);
+    }
+    catch {}
+    finally {
+      libcurl.stderr = previous;
+    }
+    let details = lines.filter((line) => /cert|verify|BADCERT|expire|trust|issuer|chain|x509|SSL/i.test(line));
+    console.warn(
+      `sandstone host: certificate check failed for ${host} (device time ${new Date().toISOString()}).\n` +
+      (details.length ? details.join("\n") : "libcurl gave no further details.")
+    );
+  })();
+}
+
 async function fetch_with_retry(url, options, ignore_block = false, use_session = null) {
   let method = String(options?.method || "GET").toUpperCase();
   let can_retry = method === "GET" || method === "HEAD";
@@ -923,6 +965,7 @@ async function fetch_with_retry(url, options, ignore_block = false, use_session 
       }
       note_failure(e, url);
       let message = error_message(e);
+      if (CERT_ERROR.test(message)) diagnose_certificate(url);
       if (!ignore_block && is_host_blocked(url) && CONNECTION_ERRORS.test(message)) throw e;
       let retryable = can_retry ? is_transient(e) : PRE_REQUEST_ERRORS.test(message);
       let tls = TLS_ERROR.test(message);

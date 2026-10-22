@@ -341,22 +341,45 @@ function install_cache_stub() {
   catch {}
 }
 
+const NAVIGATION_GLOBALS = [
+  "navigation",
+  "Navigation",
+  "NavigationHistoryEntry",
+  "NavigationTransition",
+  "NavigationDestination",
+  "NavigationCurrentEntryChangeEvent",
+  "NavigateEvent",
+  "NavigationActivation"
+];
+
+// Sites feature-detect the Navigation API with `"navigation" in window` (as well
+// as typeof checks) and then expect it to work. Sandstone drives navigation
+// itself, so the API has to look absent: the properties are removed from the
+// whole prototype chain instead of just being set to undefined, which would
+// leave `in` returning true and make pages (e.g. DuckDuckGo) take a code path
+// that crashes.
 function hide_navigation_api() {
   if (is_worker) return;
-  try {
-    delete globalThis.navigation;
-  }
-  catch {}
-  if ("navigation" in globalThis) {
-    try {
-      Object.defineProperty(globalThis, "navigation", {
-        configurable: true,
-        enumerable: false,
-        writable: true,
-        value: undefined
-      });
+  for (let key of NAVIGATION_GLOBALS) {
+    let target = globalThis;
+    while (target && target !== Object.prototype) {
+      try {
+        delete target[key];
+      }
+      catch {}
+      target = Object.getPrototypeOf(target);
     }
-    catch {}
+    if (key in globalThis) {
+      try {
+        Object.defineProperty(globalThis, key, {
+          configurable: true,
+          enumerable: false,
+          writable: true,
+          value: undefined
+        });
+      }
+      catch {}
+    }
   }
 }
 
