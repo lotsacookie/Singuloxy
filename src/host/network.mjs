@@ -927,6 +927,15 @@ function diagnose_certificate(url) {
       libcurl.stderr = previous;
     }
     let details = lines.filter((line) => /cert|verify|BADCERT|expire|trust|issuer|chain|x509|SSL/i.test(line));
+    let filtered = details.find((line) => /block\s?page|blocked|nextdns|adguard|pi-?hole|opendns|umbrella|cleanbrowsing|controld|filter/i.test(line));
+    if (filtered) {
+      console.warn(
+        `sandstone host: ${host} is being blocked by a DNS filter on the network the wisp server resolves through ` +
+        `(its certificate was issued by a block page: ${filtered.trim()}). This is normal for trackers and error reporters; ` +
+        "allow-list the domain in the filter, or point the wisp server at an unfiltered resolver, if the site needs it."
+      );
+      return;
+    }
     console.warn(
       `sandstone host: certificate check failed for ${host} (device time ${new Date().toISOString()}).\n` +
       (details.length ? details.join("\n") : "libcurl gave no further details.")
