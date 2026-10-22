@@ -2,10 +2,32 @@ import * as network from "../network.mjs";
 import * as loader from "../loader.mjs";
 import * as rpc from "../../rpc.mjs";
 import * as util from "../../util.mjs";
+import { scan_import_scripts } from "./worker_scan.mjs";
+
+const DISCOVERY_TIMEOUT_MS = 10000;
+
+function clone_worker_event(event) {
+  if (event.type === "error") {
+    return new ErrorEvent("error", {
+      message: event.message,
+      filename: event.filename,
+      lineno: event.lineno,
+      colno: event.colno,
+      error: event.error,
+      cancelable: true
+    });
+  }
+  return new MessageEvent(event.type, {
+    data: event.data,
+    origin: event.origin,
+    lastEventId: event.lastEventId,
+    ports: Array.from(event.ports || [])
+  });
+}
 import { wrap_obj, run_script_safe, convert_url, document_base } from "../context.mjs";
 
 export function fakeImportScripts(...paths) {
-  let script_urls = paths.map((path) => convert_url(path, document_base()));
+  let script_urls = paths.map((path) => convert_url(path, network.worker_base || document_base()));
 
   if (network.requests_allowed) {
     for (let url of script_urls) {
@@ -61,15 +83,23 @@ export class FakeWorker extends EventTarget {
 
   async #load_worker() {
     let response = await network.fetch(this.#url);
-    let worker_js = JSON.stringify(await response.text());
+    let worker_text = await response.text();
+    let worker_js = JSON.stringify(worker_text);
     let worker_id = "" + Math.random();
+    let worker_base_json = JSON.stringify(new URL(String(this.#url), document_base()).href);
     let temp_script = `
       ${loader.runtime_src}
       sandstone_frame.loader.set_url("${loader.url}");
+      sandstone_frame.network.set_worker_base(${worker_base_json});
       sandstone_frame.loader.set_frame_id("${worker_id}");
       sandstone_frame.context.update_ctx();
       sandstone_frame.rpc.set_on_attach(() => {
-        sandstone_frame.context.run_script(${worker_js});
+        try {
+          sandstone_frame.context.run_script(${worker_js});
+        }
+        finally {
+          self.postMessage({frame_id: "${worker_id}", urls: [], done: true});
+        }
       })
     `;
     let temp_blob = new Blob([temp_script], {type: "text/javascript"});
@@ -81,9 +111,11 @@ export class FakeWorker extends EventTarget {
     let recorded_urls = new Set();
     let terminate_worker;
     temp_worker.onmessage = (event) => {
-      if (event.data.frame_id !== worker_id) return;
-      for (let url of event.data.urls)
+      let data = event.data;
+      if (!data || data.frame_id !== worker_id) return;
+      for (let url of data.urls || [])
         recorded_urls.add(url);
+      if (data.done) terminate_worker();
     }
     temp_worker.onerror = () => {
       terminate_worker();
@@ -91,9 +123,12 @@ export class FakeWorker extends EventTarget {
 
     await new Promise((resolve) => {
       terminate_worker = resolve;
-      setTimeout(resolve, 500);
+      setTimeout(resolve, DISCOVERY_TIMEOUT_MS);
     });
     temp_worker.terminate();
+    for (let url of scan_import_scripts(worker_text, JSON.parse(worker_base_json))) {
+      recorded_urls.add(url);
+    }
 
     let promises = [];
     let script_data = {};
@@ -118,6 +153,7 @@ export class FakeWorker extends EventTarget {
       ${loader.runtime_src}
       ${cache_substr}
       sandstone_frame.loader.set_url(${JSON.stringify(loader.url)});
+      sandstone_frame.network.set_worker_base(${worker_base_json});
       sandstone_frame.loader.set_frame_id("${worker_id}");
       sandstone_frame.network.enable_network();
       sandstone_frame.context.update_ctx();
@@ -157,10 +193,13 @@ export class FakeWorker extends EventTarget {
 
   #setup_listener(event_name) {
     this.#worker.addEventListener(event_name, (event) => {
-      this["on" + event_name](event);
-      let new_event = new event.constructor(event_name);
-      wrap_obj(event, new_event);
-      this.dispatchEvent(new_event);
+      if (event_name === "error") {
+        util.quiet_error("sandstone: worker error", String(this.#url), event.message, event.filename, event.lineno, event.colno);
+      }
+      let cloned = clone_worker_event(event);
+      let handler = this["on" + event_name];
+      if (typeof handler === "function") handler.call(this, cloned);
+      this.dispatchEvent(cloned);
     })
   }
 

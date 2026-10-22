@@ -16,6 +16,11 @@ export const rpc_ws_close = rpc.create_rpc_wrapper(rpc.host, "ws_close");
 
 export const known_urls = {};
 export const resource_cache = {};
+export let worker_base = null;
+
+export function set_worker_base(url) {
+  worker_base = url;
+}
 export let requests_allowed = false;
 
 export function enable_network(allowed=true) {
