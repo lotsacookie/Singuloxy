@@ -1,4 +1,5 @@
 import { quiet_warn } from "../util.mjs";
+import * as response_cache from "./cache.mjs";
 import { iframes } from "./controller.mjs";
 import { rpc_handlers } from "../rpc.mjs";
 import { libcurl } from "libcurl.js/bundled";
@@ -1647,6 +1648,21 @@ rpc_handlers["fetch"] = async function(url, options) {
 
   if (tracker_blocking && is_blocked(url)) return blocked_payload(url, owner);
 
+  let cached = await response_cache.lookup(url, options);
+  if (cached) {
+    let cached_id = Math.random() + "";
+    streams[cached_id] = new_stream({
+      reader: cached.reader,
+      owner: owner,
+      url: url,
+      options: options ? {...options} : undefined,
+      expected: cached.length
+    });
+    enforce_stream_cap();
+    cached.payload.stream_id = cached_id;
+    return cached.payload;
+  }
+
   if (!session) await session_ready;
   let host = host_of(url);
   await acquire_host_slot(host);
@@ -1775,12 +1791,15 @@ rpc_handlers["fetch"] = async function(url, options) {
 
       let stream_id = Math.random() + "";
       streams[stream_id] = new_stream({
-        reader: create_segmented_reader(
-          segment_url,
-          segment_options ? {...segment_options} : undefined,
-          segment_total,
-          segment_seeds,
-          url
+        reader: response_cache.wrap_reader(
+          create_segmented_reader(
+            segment_url,
+            segment_options ? {...segment_options} : undefined,
+            segment_total,
+            segment_seeds,
+            url
+          ),
+          response_cache.plan(url, method, options, payload, segment_total)
         ),
         owner: owner,
         url: url,
@@ -1814,7 +1833,10 @@ rpc_handlers["fetch"] = async function(url, options) {
     if (typeof response.body?.getReader === "function") {
       let stream_id = Math.random() + "";
       streams[stream_id] = new_stream({
-        reader: response.body.getReader(),
+        reader: response_cache.wrap_reader(
+          response.body.getReader(),
+          response_cache.plan(url, method, options, payload, expected_length(response, method))
+        ),
         owner: owner,
         url: url,
         options: options ? {...options} : undefined,

@@ -42,14 +42,23 @@ This is at a very early stage of development and lacks support for most web APIs
 - HTML forms
 - Cookies
 - ES modules
+- Persistent response cache (IndexedDB, kept on the host page)
 - Document lifecycle (`readyState`, `DOMContentLoaded`, `load`)
 
 ### Notable Unimplemented Features
-- HTTP request caching
 - Service workers (stubbed on purpose)
 
 ### Known Issues
 - React hydration errors such as `Minified React error #421` on the Spotify web player. `DOMContentLoaded` and `load` used to fire synchronously right after the page scripts ran, and `document.readyState` never reflected loading. Both now follow the real browser lifecycle, which removes one known trigger. This has not been verified against Spotify in a live browser yet.
+
+### Persistent Cache
+Static files such as scripts, styles, images, fonts, media, wasm and other large downloads are stored in IndexedDB on the host page and reused in later sessions. Cached responses skip the network entirely and also answer HTTP range requests, so cached videos can be seeked. HTML, JSON, playlists and requests that carry credentials are never cached, and responses marked `no-store`, `no-cache` or `private` are skipped.
+
+The cache is exposed as `cache` on the host module, next to `controller` and `network`:
+- `cache.set_options({max_bytes, max_entry_bytes, large_bytes, default_ttl_ms, large_ttl_ms, max_ttl_ms, large_files_ignore_ttl, enabled})`
+- `cache.stats()` returns the entry count and total bytes
+- `cache.clear()` empties the cache and `cache.remove(url)` drops one entry
+- `cache.request_persistence()` asks the browser not to evict the stored data
 
 ## Usage
 ### Building

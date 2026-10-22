@@ -1,5 +1,6 @@
 export * as controller from "./controller.mjs";
 export * as network from "./network.mjs";
+export * as cache from "./cache.mjs";
 
 import * as rpc from "../rpc.mjs";
 rpc.set_role("host");
