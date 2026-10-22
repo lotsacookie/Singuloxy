@@ -4,7 +4,7 @@ import * as network from "../network.mjs";
 import * as loader from "../loader.mjs";
 import * as parser from "../parser.mjs";
 import { script_state } from "./script.mjs";
-import { ctx, convert_url } from "../context.mjs";
+import { ctx, document_base, convert_url } from "../context.mjs";
 
 const module_cache = new Map();
 const import_map = { imports: {} };
@@ -54,7 +54,7 @@ function resolve_specifier(specifier, base_url) {
 export function rewrite_import_map(script_element) {
   try {
     let parsed = JSON.parse(script_element.textContent);
-    let base = ctx.location.href;
+    let base = document_base();
     for (let [key, value] of Object.entries(parsed.imports || {})) {
       if (typeof value !== "string") continue;
       let map_key = is_bare_specifier(key) ? key : convert_url(key, base);
@@ -238,7 +238,7 @@ export async function load_module(cache_key, base_url, source_text = null, chain
 }
 
 export async function dynamic_import(specifier, base_url, options) {
-  let absolute = resolve_specifier(String(specifier), base_url || ctx.location.href);
+  let absolute = resolve_specifier(String(specifier), base_url || document_base());
   if (!should_proxy(absolute)) {
     return import(/* webpackIgnore: true */ absolute);
   }
@@ -260,7 +260,7 @@ export async function rewrite_module_script(script_element) {
   let inline_text = script_element.textContent;
 
   let is_inline = !script_url;
-  let base_url = script_url ? convert_url(script_url, ctx.location.href) : ctx.location.href;
+  let base_url = script_url ? convert_url(script_url, document_base()) : document_base();
   let cache_key = is_inline ? Symbol("inline-module") : base_url;
 
   if (script_url) script_element.setAttribute("__src", script_url);

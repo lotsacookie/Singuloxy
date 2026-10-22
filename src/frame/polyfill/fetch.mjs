@@ -1,4 +1,4 @@
-import { ctx } from "../context.mjs";
+import { ctx, document_base } from "../context.mjs";
 import * as network from "../network.mjs";
 
 const NativeRequest = globalThis.Request;
@@ -41,7 +41,7 @@ export async function fetch(resource, init={}) {
   else if (Array.isArray(params.headers)) {
     params.headers = Object.fromEntries(params.headers);
   }
-  url = (new URL(url, ctx.location.href)).href;
+  url = (new URL(url, document_base())).href;
   if (params.body instanceof ReadableStream) {
     params.duplex = "half";
   }

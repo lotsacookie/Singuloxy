@@ -1,4 +1,4 @@
-import { ctx, convert_url, intercept_property, proxy_function } from "../context.mjs";
+import { ctx, document_base, convert_url, intercept_property, proxy_function } from "../context.mjs";
 import * as network from "../network.mjs";
 
 const PICTURE_IMAGE_TYPES = new Set([
@@ -100,7 +100,7 @@ function resolve_http_url(value) {
   let text = String(value);
   if (/^(data|blob|javascript|about):/i.test(text)) return null;
   try {
-    let resolved = convert_url(text, ctx.location.href);
+    let resolved = convert_url(text, document_base());
     if (/^https?:/i.test(resolved)) return resolved;
   }
   catch {}
@@ -179,7 +179,7 @@ export function rewrite_media(media_element) {
     raw_set("__src", value);
     loading_count++;
     try {
-      media_url = convert_url(value, ctx.location.href);
+      media_url = convert_url(value, document_base());
       await wait_until_near(media_element);
       if (request_id !== latest_request) return;
       let media_blob = await fetch_blob(media_url, is_image);

@@ -2,7 +2,7 @@ import * as rewrite from "./index.mjs";
 
 import { parse_css } from "./css.mjs";
 import { strip_urls } from "./placeholder.mjs";
-import { run_script, is_ready, page_url } from "../context.mjs";
+import { run_script, is_ready, document_base } from "../context.mjs";
 
 function is_stylesheet_link(element) {
   if (!(element instanceof HTMLLinkElement)) return false;
@@ -64,7 +64,7 @@ function rewrite_element_single(element) {
 
   let inline_style = element.getAttribute("style");
   if (inline_style) {
-    let new_css = parse_css(inline_style, page_url());
+    let new_css = parse_css(inline_style, document_base());
     if (typeof new_css === "string") {
       if (new_css !== inline_style) element.style.cssText = new_css;
     }

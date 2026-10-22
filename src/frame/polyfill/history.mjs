@@ -1,5 +1,5 @@
 import * as loader from "../loader.mjs";
-import { ctx, convert_url } from "../context.mjs";
+import { ctx, document_base, convert_url } from "../context.mjs";
 import { internal } from "./location.mjs";
 
 export class FakeHistory {
@@ -17,7 +17,7 @@ export class FakeHistory {
 
   #resolve(url) {
     if (url === undefined || url === null) return internal.href;
-    let full_url = convert_url(String(url), ctx.location.href);
+    let full_url = convert_url(String(url), document_base());
     if (new URL(full_url).origin !== internal.origin) {
       throw new DOMException("The history state cannot be changed to a different origin.", "SecurityError");
     }

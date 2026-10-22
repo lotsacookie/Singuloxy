@@ -1,5 +1,5 @@
 import * as network from "../network.mjs";
-import { ctx, convert_url } from "../context.mjs";
+import { ctx, document_base, convert_url } from "../context.mjs";
 import { parse_css, with_deadline } from "./css.mjs";
 
 const STYLESHEET_TIMEOUT_MS = 30 * 1000;
@@ -19,7 +19,7 @@ export async function rewrite_stylesheet(link_element) {
     return;
   }
 
-  let css_url = convert_url(link_href, ctx.location.href);
+  let css_url = convert_url(link_href, document_base());
   let css = null;
   let final_url = css_url;
   let response = null;

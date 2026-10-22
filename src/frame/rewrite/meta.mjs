@@ -1,4 +1,4 @@
-import { ctx, convert_url } from "../context.mjs";
+import { ctx, document_base, convert_url } from "../context.mjs";
 import * as loader from "../loader.mjs";
 
 function rewrite_refresh(meta_element) {
@@ -14,7 +14,7 @@ function rewrite_refresh(meta_element) {
   if (!url) url = "/"
   
   //do the navigation
-  url = convert_url(url, ctx.location.href);
+  url = convert_url(url, document_base());
   setTimeout(() => {
     loader.navigate(loader.frame_id, url);
   }, parseInt(timeout) * 1000);

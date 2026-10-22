@@ -2,10 +2,10 @@ import * as network from "../network.mjs";
 import * as loader from "../loader.mjs";
 import * as rpc from "../../rpc.mjs";
 import * as util from "../../util.mjs";
-import { wrap_obj, run_script_safe, convert_url } from "../context.mjs";
+import { wrap_obj, run_script_safe, convert_url, document_base } from "../context.mjs";
 
 export function fakeImportScripts(...paths) {
-  let script_urls = paths.map((path) => convert_url(path, loader.url));
+  let script_urls = paths.map((path) => convert_url(path, document_base()));
 
   if (network.requests_allowed) {
     for (let url of script_urls) {

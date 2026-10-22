@@ -1,4 +1,4 @@
-import { ctx, convert_url } from "../context.mjs";
+import { ctx, document_base, convert_url } from "../context.mjs";
 import * as network from "../network.mjs";
 
 const SVG_NS = "http://www.w3.org/2000/svg";
@@ -10,7 +10,7 @@ function http_url(value) {
   let text = String(value).trim();
   if (/^(data|blob|javascript|about):/i.test(text)) return null;
   try {
-    let resolved = convert_url(text, ctx.location.href);
+    let resolved = convert_url(text, document_base());
     if (/^https?:/i.test(resolved)) return resolved;
   }
   catch {}

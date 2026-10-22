@@ -1,7 +1,7 @@
 import * as rpc from "../rpc.mjs";
 import * as loader from "./loader.mjs";
 import * as util from "../util.mjs";
-import { ctx, get_cookie_jar } from "./context.mjs";
+import { ctx, document_base, get_cookie_jar } from "./context.mjs";
 
 const NativeResponse = globalThis.Response;
 const NativeHeaders = globalThis.Headers;
@@ -183,7 +183,7 @@ function create_body_stream(stream_id, href) {
 export async function fetch(url, options) {
   if (!requests_allowed) throw "Network request blocked";
 
-  let base_url = ctx.location?.href || loader.url;
+  let base_url = document_base();
   url = new URL(url, base_url);
   if (url.protocol === "data:" || url.protocol === "blob:") {
     return await globalThis.fetch(url.href, options);
@@ -254,7 +254,7 @@ export class WebSocket extends EventTarget {
   constructor(url, protocols=[]) {
     super();
 
-    let url_obj = new URL(url, ctx.location.href);
+    let url_obj = new URL(url, document_base());
     url_obj.protocol = url_obj.protocol.replace("http", "ws");
     this.url = url_obj.href;
 

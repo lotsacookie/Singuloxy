@@ -1,7 +1,7 @@
 import * as rewrite from "../rewrite/index.mjs";
 import { parse_css } from "../rewrite/css.mjs";
 import { strip_urls } from "../rewrite/placeholder.mjs";
-import { ctx, proxy_function } from "../context.mjs";
+import { ctx, document_base, proxy_function } from "../context.mjs";
 
 const MEDIA_TAGS = new Set(["img", "audio", "video", "source"]);
 const MEDIA_SELECTOR = "img, source, video, audio, input[type='image']";
@@ -122,7 +122,7 @@ function needs_css_rewrite(text) {
 function apply_css(style, key, text, commit) {
   let result;
   try {
-    result = parse_css(text, ctx.location.href);
+    result = parse_css(text, document_base());
   }
   catch (e) {
     console.error("sandstone: style rewrite failed", e);

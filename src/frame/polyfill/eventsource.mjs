@@ -1,4 +1,4 @@
-import { ctx } from "../context.mjs";
+import { ctx, document_base } from "../context.mjs";
 import * as network from "../network.mjs";
 
 export class FakeEventSource extends EventTarget {
@@ -17,7 +17,7 @@ export class FakeEventSource extends EventTarget {
 
   constructor(url, init) {
     super();
-    this.url = new URL(String(url), ctx.location.href).href;
+    this.url = new URL(String(url), document_base()).href;
     this.withCredentials = !!(init && init.withCredentials);
     this.readyState = 0;
     this.onopen = null;

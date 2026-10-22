@@ -1,4 +1,4 @@
-import { ctx, convert_url } from "../context.mjs";
+import { ctx, document_base, convert_url } from "../context.mjs";
 import * as loader from "../loader.mjs";
 
 let form_handler_installed = false;
@@ -20,7 +20,7 @@ function build_request(form_element, submitter) {
   ).toLowerCase();
   let action = (submitter && submitter.getAttribute("formaction")) || form_element.getAttribute("action");
   if (!action) action = ctx.location.href;
-  let target_url = convert_url(action, ctx.location.href);
+  let target_url = convert_url(action, document_base());
 
   let form_data = build_form_data(form_element, submitter);
 

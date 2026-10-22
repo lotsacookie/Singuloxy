@@ -1,4 +1,4 @@
-import { ctx, convert_url, intercept_property, proxy_function, get_cookie_jar } from "../context.mjs";
+import { ctx, document_base, convert_url, intercept_property, proxy_function, get_cookie_jar } from "../context.mjs";
 import * as network from "../network.mjs";
 import * as loader from "../loader.mjs";
 import * as util from "../../util.mjs";
@@ -73,7 +73,7 @@ export function rewrite_iframe(iframe_element) {
 
   let fetch_src = async (value) => {
     iframe_element.setAttribute("__src", value);
-    iframe_url = convert_url(value, ctx.location.href);
+    iframe_url = convert_url(value, document_base());
     console.log("navigating iframe to", iframe_url);
     let final_url = iframe_url;
     let error;

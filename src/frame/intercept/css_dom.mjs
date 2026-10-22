@@ -1,4 +1,4 @@
-import { ctx, proxy_function } from "../context.mjs";
+import { ctx, document_base, proxy_function } from "../context.mjs";
 import { parse_css } from "../rewrite/css.mjs";
 
 const NEEDS_REWRITE = /@import\s+(?!url\(\s*["']?(?:data:|blob:)|["'](?:data:|blob:))|url\(\s*(?!["']?(?:data:|blob:|about:|#))|image-set\(\s*["']/i;
@@ -12,7 +12,7 @@ function needs_rewrite(text) {
 
 function base_url() {
   try {
-    return ctx.location.href;
+    return document_base();
   }
   catch {
     return location.href;

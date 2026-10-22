@@ -51,6 +51,29 @@ export function page_url() {
   return globalThis.location.href;
 }
 
+// The document base URL: the first <base href> (resolved against the page URL),
+// otherwise the page URL itself. While a page is being loaded its parsed
+// document is registered here because it is not attached to the frame yet.
+let loading_doc = null;
+
+export function set_loading_document(doc) {
+  loading_doc = doc || null;
+}
+
+export function document_base() {
+  let fallback = page_url();
+  try {
+    let doc = loading_doc || (typeof document !== "undefined" ? document : null);
+    let base_element = doc && doc.querySelector ? doc.querySelector("base[href]") : null;
+    if (base_element) {
+      let resolved = new URL(base_element.getAttribute("href"), fallback);
+      if (resolved.protocol === "http:" || resolved.protocol === "https:") return resolved.href;
+    }
+  }
+  catch {}
+  return fallback;
+}
+
 export function unwrap_this(value) {
   if (value === ctx.__proxy__) return globalThis;
   let doc = intercept.document;
@@ -194,7 +217,7 @@ export class CustomCTX {
     let text = url === undefined || url === null ? "" : String(url);
     if (OPEN_IN_FRAME && text !== "" && !is_worker) {
       try {
-        let resolved = new URL(text, ctx.location.href);
+        let resolved = new URL(text, document_base());
         if (resolved.protocol === "http:" || resolved.protocol === "https:") {
           loader.navigate(loader.frame_id, resolved.href);
           return null;

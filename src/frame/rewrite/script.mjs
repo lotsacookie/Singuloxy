@@ -2,7 +2,7 @@ import * as network from "../network.mjs";
 import * as loader from "../loader.mjs";
 import * as parser from "../parser.mjs";
 
-import { ctx, convert_url, intercept_property, proxy_function } from "../context.mjs";
+import { ctx, document_base, convert_url, intercept_property, proxy_function } from "../context.mjs";
 import { swap_current_script } from "../intercept/document.mjs";
 
 export const pending_scripts = [];
@@ -91,7 +91,7 @@ export async function rewrite_script(script_element) {
     get: () => {
       if (!script_url) return "";
       try {
-        return convert_url(script_url, ctx.location.href);
+        return convert_url(script_url, document_base());
       }
       catch {
         return script_url;
@@ -117,7 +117,7 @@ export async function rewrite_script(script_element) {
 
   async function download_src() {
     script_element.setAttribute("__src", script_url);
-    let src_url = convert_url(script_url, ctx.location.href);
+    let src_url = convert_url(script_url, document_base());
     let last_error = null;
 
     for (let attempt = 1; attempt <= SCRIPT_DOWNLOAD_ATTEMPTS; attempt++) {

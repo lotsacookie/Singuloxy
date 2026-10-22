@@ -1,5 +1,5 @@
 import * as network from "../network.mjs";
-import { ctx } from "../context.mjs";
+import { ctx, document_base } from "../context.mjs";
 
 const PROGRESS_INTERVAL_MS = 50;
 const LOG_INTERVAL_MS = 2000;
@@ -107,7 +107,7 @@ export class FakeXMLHttpRequest extends EventTarget {
     
     this.#init_internal();
     this.readyState = this.OPENED;
-    this.#req_url = new URL(url, ctx.location.href);
+    this.#req_url = new URL(url, document_base());
     if (user) {
       this.#req_url.username = user;
       this.#req_url.password = password || "";
