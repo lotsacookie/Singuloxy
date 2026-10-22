@@ -1,3 +1,4 @@
+import { quiet_error, quiet_warn } from "../../util.mjs";
 import * as network from "../network.mjs";
 import * as loader from "../loader.mjs";
 import * as parser from "../parser.mjs";
@@ -132,7 +133,7 @@ export async function rewrite_script(script_element) {
         let garbled = looks_garbled(text);
         let problem = garbled ? "response does not look like JavaScript text" : size_problem(response, text);
         if (problem && !final_attempt) {
-          console.warn(`sandstone: script download looks wrong (${problem}), retrying (${attempt}/${SCRIPT_DOWNLOAD_ATTEMPTS - 1}):`, src_url);
+          quiet_warn(`sandstone: script download looks wrong (${problem}), retrying (${attempt}/${SCRIPT_DOWNLOAD_ATTEMPTS - 1}):`, src_url);
           last_error = new Error(problem);
           await sleep(300 * attempt);
           continue;
@@ -142,7 +143,7 @@ export async function rewrite_script(script_element) {
           break;
         }
         if (problem) {
-          console.warn(`sandstone: script download still looks wrong (${problem}), using it anyway:`, src_url);
+          quiet_warn(`sandstone: script download still looks wrong (${problem}), using it anyway:`, src_url);
         }
         script_text = text;
         return true;
@@ -153,7 +154,7 @@ export async function rewrite_script(script_element) {
       }
     }
 
-    console.error("sandstone: failed to load script", src_url, last_error);
+    quiet_error("sandstone: failed to load script", src_url, last_error);
     script_text = "";
     script_element.dispatchEvent(new Event("error"));
     return false;

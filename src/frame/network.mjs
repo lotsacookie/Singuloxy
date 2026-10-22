@@ -139,7 +139,7 @@ function store_response_cookies(url_obj, fetch_data) {
     }
   }
   catch (e) {
-    console.error("sandstone: could not store response cookies", e);
+    util.quiet_error("sandstone: could not store response cookies", e);
   }
 }
 
@@ -166,7 +166,7 @@ function create_body_stream(stream_id, href) {
         if (finished) return;
         finished = true;
         let reason = e?.message ?? String(e);
-        console.error("sandstone: download failed mid-transfer:", href, reason);
+        util.quiet_error("sandstone: download failed mid-transfer:", href, reason);
         try {
           controller.error(new TypeError("Failed to fetch " + href + " (" + reason + ")"));
         }
@@ -198,7 +198,7 @@ export async function fetch(url, options) {
   }
   catch (e) {
     let reason = e?.message ?? String(e);
-    console.error("sandstone: proxied fetch failed:", url.href, reason);
+    util.quiet_error("sandstone: proxied fetch failed:", url.href, reason);
     throw new TypeError("Failed to fetch " + url.href + " (" + reason + ")");
   }
 
@@ -296,7 +296,7 @@ export class WebSocket extends EventTarget {
       });
     }
     catch (e) {
-      console.error("sandstone: websocket connect failed", this.url, e?.message ?? e);
+      util.quiet_error("sandstone: websocket connect failed", this.url, e?.message ?? e);
       this.#forward_event("error", null);
       this.#forward_event("close", 1006);
       return;
@@ -372,7 +372,7 @@ export class WebSocket extends EventTarget {
         handler.call(this, event);
       }
       catch (e) {
-        console.error(e);
+        util.quiet_error(e);
       }
     }
     this.dispatchEvent(event);

@@ -1,3 +1,4 @@
+import { quiet_error } from "../../util.mjs";
 import * as network from "../network.mjs";
 import { ctx, document_base } from "../context.mjs";
 
@@ -72,7 +73,7 @@ export class FakeXMLHttpRequest extends EventTarget {
         target["on" + event.type](event);  
     }
     catch (e) {
-      console.error(e);
+      quiet_error(e);
     }
   } 
 
@@ -263,7 +264,7 @@ export class FakeXMLHttpRequest extends EventTarget {
       }
       catch (e) {
         if (this.#aborted) return;
-        console.error("sandstone: xhr failed", this.#req_url?.href, e);
+        quiet_error("sandstone: xhr failed", this.#req_url?.href, e);
         this.readyState = this.DONE;
         this.#emit_event(new ProgressEvent("error"));
       }

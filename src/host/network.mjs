@@ -1,3 +1,4 @@
+import { quiet_warn } from "../util.mjs";
 import { iframes } from "./controller.mjs";
 import { rpc_handlers } from "../rpc.mjs";
 import { libcurl } from "libcurl.js/bundled";
@@ -297,7 +298,7 @@ function log_throttled(kind, host, ...args) {
     }
   }
   if (skipped > 0) args.push(`(+${skipped} similar suppressed)`);
-  console.warn(...args);
+  quiet_warn(...args);
 }
 
 try {
@@ -308,7 +309,7 @@ try {
   };
 }
 catch (e) {
-  console.warn("sandstone host: could not wrap set_websocket:", String(e?.message ?? e));
+  quiet_warn("sandstone host: could not wrap set_websocket:", String(e?.message ?? e));
 }
 
 export function set_websocket(url) {
@@ -670,7 +671,7 @@ function make_session() {
     return new libcurl.HTTPSession({enable_cookies: true});
   }
   catch (e) {
-    console.warn("sandstone host: cookie-enabled session failed, using a plain session:", error_message(e));
+    quiet_warn("sandstone host: cookie-enabled session failed, using a plain session:", error_message(e));
     return new libcurl.HTTPSession();
   }
 }
@@ -684,12 +685,12 @@ function rotate_wisp() {
   let next = candidates[wisp.rotations % candidates.length];
   wisp.rotations++;
   wisp.last_rotation = now;
-  console.warn(`sandstone host: wisp server ${ws_url} looks unreachable, switching to ${next}`);
+  quiet_warn(`sandstone host: wisp server ${ws_url} looks unreachable, switching to ${next}`);
   try {
     libcurl.set_websocket(next);
   }
   catch (e) {
-    console.warn("sandstone host: could not switch wisp server:", error_message(e));
+    quiet_warn("sandstone host: could not switch wisp server:", error_message(e));
   }
 }
 
@@ -698,7 +699,7 @@ function trip_wisp() {
   wisp.tripped = true;
   wisp.trips++;
   wisp.down_until = now + wisp.backoff;
-  console.warn(WISP_GATE_ENABLED
+  quiet_warn(WISP_GATE_ENABLED
     ? `sandstone host: many connections are failing, pausing new requests for ${Math.round(wisp.backoff / 1000)}s (wisp server: ${ws_url})`
     : `sandstone host: many connections are failing (wisp server: ${ws_url}), requests are not being paused`);
   wisp.backoff = Math.min(wisp.backoff * 2, WISP_BACKOFF_MAX_MS);
@@ -769,7 +770,7 @@ function shrink_concurrency() {
   cooldown_until = Date.now() + COOLDOWN_MS;
   if (concurrency_limit !== previous && Date.now() - last_shrink_log > 5000) {
     last_shrink_log = Date.now();
-    console.warn(`sandstone host: connection errors across several hosts, lowering concurrent requests from ${previous} to ${concurrency_limit}`);
+    quiet_warn(`sandstone host: connection errors across several hosts, lowering concurrent requests from ${previous} to ${concurrency_limit}`);
   }
 }
 
@@ -822,7 +823,7 @@ function note_failure(error, url) {
     health.blocked_until = now + block_ms;
     health.failures = 0;
     health.tls_failures = 0;
-    console.warn(HOST_BLOCKING_ENABLED
+    quiet_warn(HOST_BLOCKING_ENABLED
       ? `sandstone host: ${host} keeps failing to connect, pausing requests to it for ${block_ms / 1000}s. This host is probably blocked by, or incompatible with, the current wisp server.`
       : `sandstone host: ${host} keeps failing to connect. This host is probably blocked by, or incompatible with, the current wisp server.`);
   }
@@ -929,14 +930,14 @@ function diagnose_certificate(url) {
     let details = lines.filter((line) => /cert|verify|BADCERT|expire|trust|issuer|chain|x509|SSL/i.test(line));
     let filtered = details.find((line) => /block\s?page|blocked|nextdns|adguard|pi-?hole|opendns|umbrella|cleanbrowsing|controld|filter/i.test(line));
     if (filtered) {
-      console.warn(
+      quiet_warn(
         `sandstone host: ${host} is being blocked by a DNS filter on the network the wisp server resolves through ` +
         `(its certificate was issued by a block page: ${filtered.trim()}). This is normal for trackers and error reporters; ` +
         "allow-list the domain in the filter, or point the wisp server at an unfiltered resolver, if the site needs it."
       );
       return;
     }
-    console.warn(
+    quiet_warn(
       `sandstone host: certificate check failed for ${host} (device time ${new Date().toISOString()}).\n` +
       (details.length ? details.join("\n") : "libcurl gave no further details.")
     );
@@ -1003,7 +1004,7 @@ export async function fetch_page(url, options) {
     catch (e) {
       if (attempt >= 2 || !CONNECTION_ERRORS.test(error_message(e))) throw e;
       attempt++;
-      console.warn("sandstone host: page request failed, retrying:", url, error_message(e));
+      quiet_warn("sandstone host: page request failed, retrying:", url, error_message(e));
       await sleep(2000 * attempt);
     }
   }
@@ -1110,7 +1111,7 @@ function create_bulk(jar) {
     return {session: created, jar: jar, users: 0, retired: false};
   }
   catch (e) {
-    console.warn("sandstone host: could not create a download session, using the shared one:", error_message(e));
+    quiet_warn("sandstone host: could not create a download session, using the shared one:", error_message(e));
     return {session: null, jar: jar, users: 0, retired: false};
   }
 }
@@ -1599,7 +1600,7 @@ async function recover_stream(stream_id, stream, error) {
     throw new Error(error_message(error));
   }
   stream.resumes++;
-  console.warn("sandstone host: resuming download at byte", stream.received, stream.url, error_message(error));
+  quiet_warn("sandstone host: resuming download at byte", stream.received, stream.url, error_message(error));
 
   try {
     stream.reader.cancel().catch(() => {});
@@ -1637,7 +1638,7 @@ function safe_close(ws_info) {
     ws_info.ws.close();
   }
   catch (e) {
-    console.warn("sandstone host: websocket close failed:", error_message(e));
+    quiet_warn("sandstone host: websocket close failed:", error_message(e));
   }
 }
 
@@ -1695,7 +1696,7 @@ rpc_handlers["fetch"] = async function(url, options) {
         let recovered = false;
         if (can_segment && PARTIAL_ERRORS.test(error_message(e))) {
           segmented_hosts.add(host);
-          console.warn("sandstone host: transfer cut off, switching to segmented download:", url, error_message(e));
+          quiet_warn("sandstone host: transfer cut off, switching to segmented download:", url, error_message(e));
           try {
             let attempt = await fetch_with_retry(url, ranged(options, 0, SEGMENT_PROBE_BYTES - 1));
             if (usable_segmented(attempt)) {
@@ -2009,7 +2010,7 @@ rpc_handlers["ws_send"] = function (frame_id, ws_id, data) {
     ws_info.ws.send(data);
   }
   catch (e) {
-    console.warn("sandstone host: websocket send failed:", error_message(e));
+    quiet_warn("sandstone host: websocket send failed:", error_message(e));
   }
 }
 

@@ -1,3 +1,4 @@
+import { quiet_error } from "./util.mjs";
 export let role = null;
 export const rpc_handlers = {};
 export const rpc_requests = {};
@@ -54,7 +55,7 @@ async function handle_procedure_call(msg, source) {
     };
   }
   catch (e) {
-    console.error(e);
+    quiet_error(e);
     output = {
       value: e,
       success: false

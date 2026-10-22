@@ -59,3 +59,30 @@ export function round_float(num, digits) {
   let multiplier = Math.pow(10, digits);
   return Math.round(num * multiplier) / multiplier;
 }
+
+
+const IGNORED_ERRORS = /error code 60\b|SSL peer certificate|remote key was not OK|certificate check failed|blocked by a DNS filter/i;
+
+export function is_ignorable_error(...values) {
+  for (let value of values) {
+    let text;
+    try {
+      text = typeof value === "string" ? value : String(value?.message ?? value);
+    }
+    catch {
+      continue;
+    }
+    if (IGNORED_ERRORS.test(text)) return true;
+  }
+  return false;
+}
+
+export function quiet_error(...args) {
+  if (is_ignorable_error(...args)) return;
+  console.error(...args);
+}
+
+export function quiet_warn(...args) {
+  if (is_ignorable_error(...args)) return;
+  console.warn(...args);
+}

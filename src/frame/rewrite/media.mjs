@@ -1,3 +1,4 @@
+import { quiet_error } from "../../util.mjs";
 import { ctx, document_base, convert_url, intercept_property, proxy_function } from "../context.mjs";
 import * as network from "../network.mjs";
 
@@ -188,7 +189,7 @@ export function rewrite_media(media_element) {
       media_element.src = blob_url;
     }
     catch (e) {
-      console.error("sandstone: failed to load media", media_url, e);
+      quiet_error("sandstone: failed to load media", media_url, e);
       if (request_id !== latest_request) return;
       allow_error = true;
       media_element.dispatchEvent(new Event("error"));

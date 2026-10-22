@@ -12,3 +12,4 @@ export * as css_dom from "./css_dom.mjs";
 export * as storage from "./storage.mjs";
 export * as document_write from "./document_write.mjs";
 export * as compat from "./compat.mjs";
+export * as media_diagnostics from "./media_diagnostics.mjs";
