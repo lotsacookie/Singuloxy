@@ -418,6 +418,7 @@ export function update_ctx() {
   install_storage_getters();
   hide_navigation_api();
   install_service_worker_stub();
+  intercept.media_diagnostics.install();
 
   globalThis.__ctx__ = ctx.__proxy__;
   globalThis.__get_this__ = ctx.__get_this__;

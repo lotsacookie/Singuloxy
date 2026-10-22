@@ -51,6 +51,12 @@ function install_eme_report() {
   });
 }
 
-install_element_errors();
-install_play_report();
-install_eme_report();
+let installed = false;
+
+export function install() {
+  if (installed) return;
+  installed = true;
+  install_element_errors();
+  install_play_report();
+  install_eme_report();
+}
