@@ -302,7 +302,39 @@ async function load_html(options) {
   }
 
   console.log("done downloading page");
+  let overlay = null;
+  try {
+    let source = document.getElementById("loading_text");
+    let sheet = document.querySelector("style");
+    if (source && sheet) {
+      overlay = document.createElement("div");
+      overlay.style.cssText = "position:fixed;inset:0;z-index:2147483647;visibility:visible;background:transparent;pointer-events:auto";
+      let shadow = overlay.attachShadow({mode: "closed"});
+      shadow.appendChild(sheet.cloneNode(true));
+      shadow.appendChild(source.cloneNode(true));
+    }
+  }
+  catch {
+    overlay = null;
+  }
   document.documentElement.replaceWith(html.documentElement);
+  let root = html.documentElement;
+  let previous_visibility = root.style.visibility;
+  let revealed = false;
+  let reveal = () => {
+    if (revealed) return;
+    revealed = true;
+    try {
+      root.style.visibility = previous_visibility;
+      if (overlay) overlay.remove();
+    }
+    catch {}
+  };
+  if (overlay) {
+    root.style.visibility = "hidden";
+    root.appendChild(overlay);
+    setTimeout(reveal, 30000);
+  }
   if (site_settings.allow_js) {
     evaluate_scripts();
     await evaluate_modules();
@@ -323,6 +355,7 @@ async function load_html(options) {
   set_ready_state("complete");
   fire_document_event("readystatechange");
   ctx.window.dispatchEvent(new Event("load"));
+  reveal();
 }
 
 async function get_favicon() {

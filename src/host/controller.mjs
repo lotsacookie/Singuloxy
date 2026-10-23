@@ -34,7 +34,7 @@ function build_frame_html(theme) {
         --text-color: ${text};
       }
       html {
-        background-color: ${bg};
+        background-color: transparent;
         font-family: sans-serif;
       }
       * {
@@ -58,12 +58,13 @@ function build_frame_html(theme) {
         height: 5.5rem;
         overflow: visible;
         filter: drop-shadow(0 0 8px color-mix(in srgb, ${text} 50%, transparent));
+        animation: ld-spin 2.4s linear infinite;
       }
       .ld-arms {
         opacity: .8;
         transform-origin: 50px 50px;
         stroke-dasharray: 1;
-        animation: ld-draw 1.2s cubic-bezier(.3,.7,.2,1) both, ld-spin 14s linear 1.2s infinite;
+        animation: ld-draw 1.2s cubic-bezier(.3,.7,.2,1) both;
       }
       .ld-core {
         transform-origin: 50px 50px;
@@ -103,7 +104,7 @@ function build_frame_html(theme) {
       @keyframes ld-sheen { from { transform: translateX(-100%) } to { transform: translateX(100%) } }
       @keyframes ld-grow { from { transform: scaleX(0) } to { transform: scaleX(.92) } }
       @media (prefers-reduced-motion: reduce) {
-        .ld-logo, .ld-arms, .ld-core, .ld-fill::after { animation: none }
+        .ld-arms, .ld-core, .ld-fill::after { animation: none }
         .ld-arms { stroke-dashoffset: 0 }
       }
       #error_div {
@@ -281,7 +282,7 @@ export class ProxyFrame {
     console.log("navigating to", url);
     this.url = new URL(url);
     
-    this.iframe.style.backgroundColor = safe_css(this.theme?.bg, "#000000");
+    this.iframe.style.backgroundColor = "transparent";
     this.on_navigate();
 
     let old_ports = [this.rpc_target.target, ...this.rpc_target.extra_targets].filter(Boolean);
