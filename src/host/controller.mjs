@@ -146,6 +146,7 @@ export class ProxyFrame {
     this.on_url_change = () => {};
     this.on_info = () => {};
     this.on_progress = () => {};
+    this.on_console = () => {};
     this.on_ready = () => {};
     this.theme = null;
     this.title = "";
@@ -343,6 +344,22 @@ rpc.rpc_handlers["navigate"] = async (frame_id, url, reload=true, form_data=null
     frame.on_url_change();
     frame.emit_info();
   }
+}
+
+rpc.rpc_handlers["console"] = async (frame_id, batch) => {
+  let frame = iframes[frame_id];
+  if (!frame || !Array.isArray(batch)) return;
+  let clean = [];
+  for (let item of batch.slice(0, 200)) {
+    if (Array.isArray(item) && typeof item[1] === "string") {
+      clean.push([typeof item[0] === "string" ? item[0] : "log", item[1].slice(0, 4000)]);
+    }
+  }
+  if (!clean.length) return;
+  try {
+    frame.on_console(clean);
+  }
+  catch {}
 }
 
 rpc.rpc_handlers["progress"] = async (frame_id, value, text) => {

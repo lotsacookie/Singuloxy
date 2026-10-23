@@ -15,6 +15,83 @@ export const session_storage = rpc.create_rpc_wrapper(rpc.host, "session_storage
 export const cookies = rpc.create_rpc_wrapper(rpc.host, "cookies");
 const page_info_rpc = rpc.create_rpc_wrapper(rpc.host, "page_info");
 
+const console_rpc = rpc.create_rpc_wrapper(rpc.host, "console");
+let console_queue = [];
+let console_timer = null;
+let console_installed = false;
+
+function console_format(value) {
+  try {
+    if (typeof value === "string") return value;
+    if (value instanceof Error) return value.stack || value.message;
+    if (typeof value === "function") return String(value);
+    if (value && typeof value === "object") {
+      try {
+        return JSON.stringify(value, (k, v) => typeof v === "bigint" ? String(v) : v, 2);
+      }
+      catch {
+        return Object.prototype.toString.call(value);
+      }
+    }
+    return String(value);
+  }
+  catch {
+    return "[unprintable]";
+  }
+}
+
+function console_flush() {
+  console_timer = null;
+  if (!console_queue.length) return;
+  let batch = console_queue;
+  console_queue = [];
+  try {
+    console_rpc(frame_id, batch);
+  }
+  catch {}
+}
+
+function console_push(level, text) {
+  if (console_queue.length >= 200) return;
+  console_queue.push([level, String(text).slice(0, 4000)]);
+  if (!console_timer) console_timer = setTimeout(console_flush, 250);
+}
+
+function install_console() {
+  if (console_installed) return;
+  console_installed = true;
+  try {
+    for (let method of ["log", "info", "warn", "error", "debug"]) {
+      let original = console[method];
+      console[method] = function(...args) {
+        try {
+          console_push(method, args.map(console_format).join(" "));
+        }
+        catch {}
+        return original.apply(this, args);
+      };
+    }
+    window.addEventListener("error", (event) => {
+      try {
+        if (event.target && event.target !== window) {
+          let target = event.target.src || event.target.href;
+          if (target) console_push("error", "Failed to load " + target);
+          return;
+        }
+        console_push("error", (event.message || "Error") + (event.filename ? ` (${event.filename}:${event.lineno}:${event.colno})` : ""));
+      }
+      catch {}
+    }, true);
+    window.addEventListener("unhandledrejection", (event) => {
+      try {
+        console_push("error", "Unhandled rejection: " + console_format(event.reason));
+      }
+      catch {}
+    });
+  }
+  catch {}
+}
+
 const progress_rpc = rpc.create_rpc_wrapper(rpc.host, "progress");
 
 function report(value, text) {
@@ -253,6 +330,7 @@ async function load_html(options) {
 
   set_url(options.url);
   set_frame_id(options.frame_id);
+  install_console();
   get_frame_html();
   update_ctx();
   patch_form_submit();
