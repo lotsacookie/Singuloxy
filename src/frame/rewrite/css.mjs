@@ -8,7 +8,7 @@ const import_regex = /@import\s+(?:url\(\s*(?:"([^"]*)"|'([^']*)'|([^)\s'"]*))\s
 const MAX_IMPORT_DEPTH = 5;
 const ASSET_TIMEOUT_MS = 20 * 1000;
 const ASSET_BUDGET_MS = 6 * 1000;
-const MAX_ASSET_FETCHES = 10;
+const MAX_ASSET_FETCHES = 6;
 const BODY_TIMEOUT_MS = 60 * 1000;
 const ASSET_CACHE_LIMIT = 400;
 
