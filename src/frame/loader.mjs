@@ -15,6 +15,28 @@ export const session_storage = rpc.create_rpc_wrapper(rpc.host, "session_storage
 export const cookies = rpc.create_rpc_wrapper(rpc.host, "cookies");
 const page_info_rpc = rpc.create_rpc_wrapper(rpc.host, "page_info");
 
+const progress_rpc = rpc.create_rpc_wrapper(rpc.host, "progress");
+let ui_target = null;
+
+function report(value, text) {
+  try {
+    let target = ui_target || document;
+    let fill = target.querySelector(".ld-fill");
+    let status = target.querySelector(".ld-status");
+    if (fill) {
+      fill.style.animation = "none";
+      fill.style.transition = "transform .4s cubic-bezier(.22,1,.36,1)";
+      fill.style.transform = `scaleX(${Math.max(0, Math.min(1, value))})`;
+    }
+    if (status) status.textContent = `${text} ${Math.round(value * 100)}%`;
+  }
+  catch {}
+  try {
+    progress_rpc(frame_id, value, text);
+  }
+  catch {}
+}
+
 let last_sent_title = null;
 function send_title() {
   let title = "";
@@ -284,12 +306,20 @@ async function load_html(options) {
   let html = parser.parseFromString(options.html, "text/html");  
   
   set_loading_document(html);
+  let creep = 0.45;
+  report(creep, "Processing page");
+  let creep_timer = setInterval(() => {
+    creep += (0.72 - creep) * 0.08;
+    report(creep, "Processing page");
+  }, 500);
   try {
     await rewrite.element(html.documentElement);
   }
   finally {
+    clearInterval(creep_timer);
     set_loading_document(null);
   }
+  report(0.75, "Rendering page");
 
   script_state.phase = "running";
 
@@ -312,6 +342,7 @@ async function load_html(options) {
       let shadow = overlay.attachShadow({mode: "closed"});
       shadow.appendChild(sheet.cloneNode(true));
       shadow.appendChild(source.cloneNode(true));
+      ui_target = shadow;
     }
   }
   catch {
@@ -335,10 +366,12 @@ async function load_html(options) {
     root.appendChild(overlay);
     setTimeout(reveal, 30000);
   }
+  report(0.85, "Running scripts");
   if (site_settings.allow_js) {
     evaluate_scripts();
     await evaluate_modules();
   }
+  report(0.93, "Finishing up");
 
   is_loaded = true;
   watch_title();
@@ -355,6 +388,7 @@ async function load_html(options) {
   set_ready_state("complete");
   fire_document_event("readystatechange");
   ctx.window.dispatchEvent(new Event("load"));
+  report(1, "Ready");
   reveal();
 }
 

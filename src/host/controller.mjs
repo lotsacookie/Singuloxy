@@ -58,7 +58,7 @@ function build_frame_html(theme) {
         height: 5.5rem;
         overflow: visible;
         filter: drop-shadow(0 0 8px color-mix(in srgb, ${text} 50%, transparent));
-        animation: ld-spin 2.4s linear infinite;
+        animation: ld-spin-rev 7s linear infinite;
       }
       .ld-arms {
         opacity: .8;
@@ -98,8 +98,15 @@ function build_frame_html(theme) {
         background: linear-gradient(90deg, transparent, color-mix(in srgb, ${bg} 55%, transparent), transparent);
         animation: ld-sheen 1.5s ease-in-out infinite;
       }
+      .ld-status {
+        font-size: .8rem;
+        opacity: .6;
+        min-height: 1.2em;
+        font-variant-numeric: tabular-nums;
+      }
       @keyframes ld-draw { from { stroke-dashoffset: 1 } to { stroke-dashoffset: 0 } }
       @keyframes ld-spin { to { transform: rotate(360deg) } }
+      @keyframes ld-spin-rev { to { transform: rotate(-360deg) } }
       @keyframes ld-pulse { 0%, 100% { transform: scale(1) } 50% { transform: scale(1.12) } }
       @keyframes ld-sheen { from { transform: translateX(-100%) } to { transform: translateX(100%) } }
       @keyframes ld-grow { from { transform: scaleX(0) } to { transform: scaleX(.92) } }
@@ -120,6 +127,7 @@ function build_frame_html(theme) {
       ${LOGO_SVG}
       <div class="ld-word">Singularity</div>
       <div class="ld-bar"><div class="ld-fill"></div></div>
+      <div class="ld-status">Loading</div>
     </div>
 
     <div id="error_div">
@@ -222,6 +230,8 @@ export class ProxyFrame {
     this.on_load = () => {};
     this.on_url_change = () => {};
     this.on_info = () => {};
+    this.on_progress = () => {};
+    this.on_ready = () => {};
     this.theme = null;
     this.title = "";
     this.icon = null;
@@ -257,6 +267,13 @@ export class ProxyFrame {
     catch {}
   }
 
+  emit_progress(value, text) {
+    try {
+      this.on_progress(value, text);
+    }
+    catch {}
+  }
+
   emit_info() {
     try {
       this.on_info({
@@ -284,6 +301,7 @@ export class ProxyFrame {
     
     this.iframe.style.backgroundColor = "transparent";
     this.on_navigate();
+    this.emit_progress(0.05, "Connecting");
 
     let old_ports = [this.rpc_target.target, ...this.rpc_target.extra_targets].filter(Boolean);
     network.end_streams_for(old_ports);
@@ -320,8 +338,10 @@ export class ProxyFrame {
           ...navigation_headers(new URL(url), referrer, !!form_data),
           ...(options.headers || {})
         };
+        this.emit_progress(0.12, "Fetching page");
         let response = await network.fetch_page(url, options);
         html = await response.text();
+        this.emit_progress(0.35, "Page downloaded");
         set_cookies = extract_set_cookies(response);
         url = response.url;
       }
@@ -337,6 +357,7 @@ export class ProxyFrame {
     settings = {...this.default_settings, ...settings};
     console.log("site settings:", settings);
 
+    this.emit_progress(0.4, "Preparing page");
     await rpc.wait_on_frame(this.iframe);
     let msg_channel = new MessageChannel();
     this.rpc_target.set_target(msg_channel.port1);
@@ -376,6 +397,11 @@ export class ProxyFrame {
     }
     this.iframe.style.backgroundColor = "unset";
     this.on_load();
+    this.emit_progress(1, "Ready");
+    try {
+      this.on_ready();
+    }
+    catch {}
     this.emit_info();
     this.refresh_icon();
   }
@@ -394,6 +420,12 @@ rpc.rpc_handlers["navigate"] = async (frame_id, url, reload=true, form_data=null
     frame.on_url_change();
     frame.emit_info();
   }
+}
+
+rpc.rpc_handlers["progress"] = async (frame_id, value, text) => {
+  let frame = iframes[frame_id];
+  if (!frame) return;
+  frame.emit_progress(value, typeof text === "string" ? text.slice(0, 80) : "");
 }
 
 rpc.rpc_handlers["page_info"] = async (frame_id, title) => {
