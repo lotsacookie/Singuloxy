@@ -13,6 +13,34 @@ const navigate_rpc = rpc.create_rpc_wrapper(rpc.host, "navigate");
 export const local_storage = rpc.create_rpc_wrapper(rpc.host, "local_storage");
 export const session_storage = rpc.create_rpc_wrapper(rpc.host, "session_storage");
 export const cookies = rpc.create_rpc_wrapper(rpc.host, "cookies");
+const page_info_rpc = rpc.create_rpc_wrapper(rpc.host, "page_info");
+
+let last_sent_title = null;
+function send_title() {
+  let title = "";
+  try {
+    title = document.title || "";
+  }
+  catch {}
+  if (title === last_sent_title) return;
+  last_sent_title = title;
+  try {
+    page_info_rpc(frame_id, title);
+  }
+  catch {}
+}
+
+function watch_title() {
+  send_title();
+  try {
+    new MutationObserver(send_title).observe(document.documentElement, {
+      subtree: true,
+      childList: true,
+      characterData: true
+    });
+  }
+  catch {}
+}
 
 export const runtime_src = self.document?.currentScript?.innerHTML;
 export let url;
@@ -281,6 +309,7 @@ async function load_html(options) {
   }
 
   is_loaded = true;
+  watch_title();
   install_click_handler();
   install_form_handler();
   install_flush_handlers();
