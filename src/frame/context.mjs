@@ -170,6 +170,52 @@ export function create_obj_proxy(obj, ctx_vars, target) {
   });
 }
 
+function safe_frame(real, owner) {
+  if (!real) return owner.__proxy__;
+  try {
+    void real.document;
+    return real;
+  }
+  catch {}
+
+  let own_keys = {
+    history: () => owner.history,
+    location: () => owner.location,
+    document: () => owner.document,
+    parent: () => proxy,
+    top: () => proxy,
+    self: () => proxy,
+    window: () => proxy,
+    frames: () => proxy,
+    origin: () => owner.origin,
+    length: () => 0,
+    closed: () => false,
+    opener: () => null
+  };
+  let proxy = new Proxy({}, {
+    get(target, key) {
+      if (typeof key === "string" && key in own_keys) return own_keys[key]();
+      if (key === "postMessage") {
+        return (...args) => real.postMessage(...args);
+      }
+      try {
+        let value = real[key];
+        return typeof value === "function" ? value.bind(real) : value;
+      }
+      catch {
+        return undefined;
+      }
+    },
+    set() {
+      return true;
+    },
+    has(target, key) {
+      return typeof key === "string" && key in own_keys;
+    }
+  });
+  return proxy;
+}
+
 export class CustomCTX {
   constructor() {
     ctx_vars.push(...get_handler_keys(this));
@@ -190,13 +236,13 @@ export class CustomCTX {
   get parent() {
     if (is_worker) return undefined;
     if (loader.is_iframe)
-      return globalThis.parent;
+      return safe_frame(globalThis.parent, this);
     return this.__proxy__;
   }
   get top() {
     if (is_worker) return undefined;
     if (loader.is_iframe)
-      return globalThis.parent;
+      return safe_frame(globalThis.parent, this);
     return this.__proxy__;
   }
 

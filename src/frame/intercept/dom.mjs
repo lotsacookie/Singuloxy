@@ -296,7 +296,14 @@ function start_safety_net() {
 
 if (typeof Node !== "undefined") {
   hook_first_arg(Node.prototype, "appendChild");
-  hook_first_arg(Node.prototype, "insertBefore");
+  proxy_function(Node.prototype, "insertBefore", (func, this_arg, args) => {
+    handle_node(args[0]);
+    let reference = args[1];
+    if (reference && reference.parentNode !== this_arg) {
+      return Reflect.apply(func, this_arg, [args[0], null]);
+    }
+    return Reflect.apply(func, this_arg, args);
+  });
   hook_first_arg(Node.prototype, "replaceChild");
 
   proxy_function(Node.prototype, "cloneNode", (func, this_arg, args) => {

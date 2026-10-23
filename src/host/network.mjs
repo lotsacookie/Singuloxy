@@ -1595,8 +1595,52 @@ async function read_with_timeout(stream, wait_ms) {
   return outcome;
 }
 
+async function refetch_stream(stream, error) {
+  let method = String(stream.options?.method || "GET").toUpperCase();
+  if (stream.refetched || method !== "GET" || stream.options?.body) return false;
+  stream.refetched = true;
+  quiet_warn("sandstone host: resume unavailable, refetching and skipping byte", stream.received, stream.url, error_message(error));
+
+  try {
+    stream.reader.cancel().catch(() => {});
+  }
+  catch {}
+  stream.pending = null;
+
+  try {
+    let response = await fetch_with_retry(stream.url, stream.options);
+    if (response.status !== 200 || !response.body) return false;
+    let source = response.body.getReader();
+    let skip = stream.received;
+    stream.reader = {
+      async read() {
+        while (true) {
+          let result = await source.read();
+          if (result.done || skip <= 0) return result;
+          let length = result.value.byteLength;
+          if (length <= skip) {
+            skip -= length;
+            continue;
+          }
+          let value = result.value.subarray(skip);
+          skip = 0;
+          return {done: false, value: value};
+        }
+      },
+      cancel() {
+        return source.cancel();
+      }
+    };
+    return true;
+  }
+  catch {
+    return false;
+  }
+}
+
 async function recover_stream(stream_id, stream, error) {
   if (!stream.can_resume || stream.resumes >= MAX_RESUMES) {
+    if (await refetch_stream(stream, error)) return;
     end_stream(stream_id);
     throw new Error(error_message(error));
   }
@@ -1618,6 +1662,7 @@ async function recover_stream(stream_id, stream, error) {
     stream.reader = response.body.getReader();
   }
   catch (e) {
+    if (await refetch_stream(stream, e)) return;
     end_stream(stream_id);
     throw new Error(error_message(e));
   }

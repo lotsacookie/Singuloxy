@@ -56,8 +56,15 @@ async function handle_procedure_call(msg, source) {
   }
   catch (e) {
     quiet_error(e);
+    let message;
+    try {
+      message = String(e?.message ?? e);
+    }
+    catch {
+      message = "unknown error";
+    }
     output = {
-      value: e,
+      value: {__rpc_error__: true, name: String(e?.name || "Error"), message: message},
       success: false
     };
   }
@@ -143,6 +150,14 @@ export async function call_procedure(target, procedure, args) {
   return await new Promise((resolve, reject) => {
     rpc_requests[msg.id] = (reply) => {
       if (reply.success) resolve(reply.value);
+      else if (reply.value && reply.value.__rpc_error__) {
+        let error = new Error(reply.value.message);
+        try {
+          error.name = reply.value.name;
+        }
+        catch {}
+        reject(error);
+      }
       else reject(reply.value);
     }
     target.postMessage(msg, {targetOrigin: "*"});  
