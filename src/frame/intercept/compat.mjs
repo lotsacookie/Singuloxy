@@ -897,7 +897,7 @@ function install_blank_iframe_access() {
     enumerable: descriptor.enumerable,
     get: function() {
       let real = descriptor.get.call(this);
-      if (!real || !is_blank(this)) return real;
+      if (!real) return real;
       try {
         if (real.document) return real;
       }
@@ -906,8 +906,21 @@ function install_blank_iframe_access() {
       let wrapper = new Proxy(real, {
         get(target, key) {
           if (key === "document") return null;
-          let value = Reflect.get(target, key);
-          return typeof value === "function" ? value.bind(target) : value;
+          try {
+            let value = Reflect.get(target, key);
+            return typeof value === "function" ? value.bind(target) : value;
+          }
+          catch {
+            return undefined;
+          }
+        },
+        set(target, key, value) {
+          try {
+            return Reflect.set(target, key, value);
+          }
+          catch {
+            return true;
+          }
         }
       });
       wrappers.set(real, wrapper);
