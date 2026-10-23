@@ -42,7 +42,9 @@ function send_title() {
 function watch_title() {
   send_title();
   try {
-    new MutationObserver(send_title).observe(document.documentElement, {
+    let head = document.head || document.querySelector("head");
+    if (!head) return;
+    new MutationObserver(send_title).observe(head, {
       subtree: true,
       childList: true,
       characterData: true
@@ -320,17 +322,17 @@ async function load_html(options) {
   console.log("done downloading page");
   document.documentElement.replaceWith(html.documentElement);
   let root = html.documentElement;
-  let previous_visibility = root.style.visibility;
+  let previous_opacity = root.style.opacity;
   let revealed = false;
   let reveal = () => {
     if (revealed) return;
     revealed = true;
     try {
-      root.style.visibility = previous_visibility;
+      root.style.opacity = previous_opacity;
     }
     catch {}
   };
-  root.style.visibility = "hidden";
+  root.style.opacity = "0";
   setTimeout(reveal, 30000);
   report(0.85, "Running scripts");
   try {
@@ -350,7 +352,11 @@ async function load_html(options) {
     fire_document_event("readystatechange");
     fire_document_event("DOMContentLoaded", true);
 
-    await Promise.race([settle(), new Promise((resolve) => setTimeout(resolve, 5000))]);
+    let settled = settle();
+    await Promise.race([settled, new Promise((resolve) => setTimeout(resolve, 2500))]);
+    report(1, "Ready");
+    reveal();
+    await settled;
 
     set_ready_state("complete");
     fire_document_event("readystatechange");

@@ -326,7 +326,7 @@ export class ProxyFrame {
     }
     catch {}
     this.emit_info();
-    this.refresh_icon();
+    setTimeout(() => this.refresh_icon(), 3000);
   }
 }
 
