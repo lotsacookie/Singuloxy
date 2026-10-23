@@ -398,8 +398,8 @@ async function load_html(options) {
   }
 
   console.log("done downloading page");
-  document.documentElement.replaceWith(html.documentElement);
   let root = html.documentElement;
+  document.documentElement.replaceWith(root);
   let previous_opacity = root.style.opacity;
   let revealed = false;
   let reveal = () => {
