@@ -75,6 +75,12 @@ function rewrite_element_single(element) {
         let result = await new_css;
         if (element.getAttribute("style") !== placeholder) return;
         element.style.cssText = result;
+        if (/url\(\s*["']?https?:/i.test(result)) {
+          let applied = element.getAttribute("style");
+          Promise.resolve(parse_css(inline_style, document_base(), 0, true)).then((upgraded) => {
+            if (element.getAttribute("style") === applied && upgraded !== result) element.style.cssText = upgraded;
+          }, () => {});
+        }
       })());
     }
   }

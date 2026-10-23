@@ -42,7 +42,7 @@ function install_sheet_hooks() {
     }
     if (!needs_rewrite(text)) return;
 
-    Promise.resolve(parse_css(text, base_url())).then((rewritten) => {
+    Promise.resolve(parse_css(text, base_url(), 0, true)).then((rewritten) => {
       if (rewritten === text) return;
       let index = -1;
       try {
@@ -62,7 +62,7 @@ function install_sheet_hooks() {
     versions.set(sheet, version);
     if (!needs_rewrite(text)) return;
 
-    Promise.resolve(parse_css(text, base_url())).then((rewritten) => {
+    Promise.resolve(parse_css(text, base_url(), 0, true)).then((rewritten) => {
       if (versions.get(sheet) !== version || rewritten === text) return;
       Reflect.apply(native_replace_sync, sheet, [rewritten]);
     }).catch(report);
@@ -97,7 +97,7 @@ function check_style(style) {
   let text = style.textContent;
   if (!needs_rewrite(text) || written.get(style) === text) return;
 
-  Promise.resolve(parse_css(text, base_url())).then((rewritten) => {
+  Promise.resolve(parse_css(text, base_url(), 0, true)).then((rewritten) => {
     if (style.textContent !== text) return;
     written.set(style, rewritten);
     if (rewritten !== text) style.textContent = rewritten;

@@ -1,5 +1,5 @@
 import * as rewrite from "../rewrite/index.mjs";
-import { parse_css } from "../rewrite/css.mjs";
+import { parse_css, evict_assets } from "../rewrite/css.mjs";
 import { strip_urls } from "../rewrite/placeholder.mjs";
 import { ctx, document_base, proxy_function } from "../context.mjs";
 
@@ -114,6 +114,45 @@ const STYLE_PROPS = [
   "mask", "webkitMask", "cursor", "content"
 ];
 const pending_css = new WeakMap();
+const NativeImage = globalThis.Image;
+
+function blob_urls_in(text) {
+  let urls = [];
+  for (let m of String(text).matchAll(/url\(\s*(?:"([^"]*)"|'([^']*)'|([^)\s'"]*))\s*\)/gi)) {
+    let url = (m[1] ?? m[2] ?? m[3] ?? "").trim();
+    if (/^blob:/i.test(url)) urls.push(url);
+  }
+  return urls;
+}
+
+function image_loads(url) {
+  return new Promise((resolve) => {
+    if (typeof NativeImage !== "function") return resolve(true);
+    let done = false;
+    let finish = (ok) => {
+      if (done) return;
+      done = true;
+      resolve(ok);
+    };
+    try {
+      let probe = new NativeImage();
+      probe.onload = () => finish(true);
+      probe.onerror = () => finish(false);
+      probe.src = url;
+      setTimeout(() => finish(true), 20000);
+    }
+    catch {
+      finish(true);
+    }
+  });
+}
+
+async function images_ok(text) {
+  let urls = blob_urls_in(text);
+  if (!urls.length) return true;
+  let results = await Promise.all(urls.map(image_loads));
+  return results.every(Boolean);
+}
 
 function needs_css_rewrite(text) {
   return typeof text === "string" && REWRITABLE_URL.test(text);
@@ -122,7 +161,7 @@ function needs_css_rewrite(text) {
 function apply_css(style, key, text, commit) {
   let result;
   try {
-    result = parse_css(text, document_base());
+    result = parse_css(text, document_base(), 0, true);
   }
   catch (e) {
     console.error("sandstone: style rewrite failed", e);
@@ -144,8 +183,17 @@ function apply_css(style, key, text, commit) {
 
   commit(strip_urls(text));
 
-  result.then((value) => {
-    if (map.get(key) === id) commit(value);
+  result.then(async (value) => {
+    if (map.get(key) !== id) return;
+    commit(value);
+    try {
+      if (!/^\s*$/.test(value) && !(await images_ok(value)) && map.get(key) === id) {
+        evict_assets(text, document_base());
+        let again = await parse_css(text, document_base(), 0, true);
+        if (map.get(key) === id) commit(again);
+      }
+    }
+    catch {}
   }, (e) => {
     console.error("sandstone: style rewrite failed", e);
   });

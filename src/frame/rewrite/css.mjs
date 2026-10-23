@@ -8,7 +8,7 @@ const import_regex = /@import\s+(?:url\(\s*(?:"([^"]*)"|'([^']*)'|([^)\s'"]*))\s
 const MAX_IMPORT_DEPTH = 5;
 const ASSET_TIMEOUT_MS = 20 * 1000;
 const ASSET_BUDGET_MS = 6 * 1000;
-const MAX_ASSET_FETCHES = 6;
+const MAX_ASSET_FETCHES = 10;
 const BODY_TIMEOUT_MS = 60 * 1000;
 const ASSET_CACHE_LIMIT = 400;
 
@@ -123,6 +123,25 @@ function load_asset(absolute_url) {
   return task;
 }
 
+async function load_asset_retry(absolute_url) {
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      return await load_asset(absolute_url);
+    }
+    catch {}
+    await new Promise((resolve) => setTimeout(resolve, Math.min(500 * 2 ** attempt, 3000) + Math.random() * 300));
+  }
+  return absolute_url;
+}
+
+export function evict_assets(css_str, css_url) {
+  for (let m of css_str.matchAll(url_regex)) {
+    let url = (m[1] ?? m[2] ?? m[3] ?? "").trim();
+    if (should_skip(url)) continue;
+    asset_cache.delete(safe_absolute(url, css_url).split("#")[0]);
+  }
+}
+
 function load_asset_budgeted(absolute_url) {
   let timer;
   let fallback = new Promise((resolve) => {
@@ -169,7 +188,7 @@ async function inline_imports(css_str, css_url, depth) {
   });
 }
 
-async function replace_urls(css_str, css_url) {
+async function replace_urls(css_str, css_url, dynamic) {
   let matches = [...css_str.matchAll(url_regex)];
   if (!matches.length) return css_str;
 
@@ -179,7 +198,7 @@ async function replace_urls(css_str, css_url) {
     if (should_skip(url) || is_legacy_font(url) || requests.has(url)) continue;
 
     let absolute_url = safe_absolute(url, css_url);
-    requests.set(url, load_asset_budgeted(absolute_url));
+    requests.set(url, dynamic ? load_asset_retry(absolute_url) : load_asset_budgeted(absolute_url));
   }
   if (!requests.size) return css_str;
 
@@ -221,7 +240,7 @@ function find_image_sets(css_str) {
   return ranges;
 }
 
-async function replace_image_set_strings(css_str, css_url) {
+async function replace_image_set_strings(css_str, css_url, dynamic) {
   let ranges = find_image_sets(css_str);
   if (!ranges.length) return css_str;
 
@@ -237,7 +256,7 @@ async function replace_image_set_strings(css_str, css_url) {
 
   let entries = await Promise.all([...urls].map(async (url) => {
     let absolute_url = safe_absolute(url, css_url);
-    return [url, await load_asset_budgeted(absolute_url)];
+    return [url, await (dynamic ? load_asset_retry(absolute_url) : load_asset_budgeted(absolute_url))];
   }));
   let map = new Map(entries);
 
@@ -254,7 +273,7 @@ async function replace_image_set_strings(css_str, css_url) {
   return output + css_str.slice(previous);
 }
 
-export function parse_css(css_str, css_url, depth = 0) {
+export function parse_css(css_str, css_url, depth = 0, dynamic = false) {
   let has_import = /@import/i.test(css_str);
   let has_url = /url\(|image-set\(/i.test(css_str);
   if (!has_import && !has_url) return css_str;
@@ -264,7 +283,7 @@ export function parse_css(css_str, css_url, depth = 0) {
     if (has_import && depth < MAX_IMPORT_DEPTH) {
       result = await inline_imports(result, css_url, depth);
     }
-    result = await replace_urls(result, css_url);
-    return await replace_image_set_strings(result, css_url);
+    result = await replace_urls(result, css_url, dynamic);
+    return await replace_image_set_strings(result, css_url, dynamic);
   })();
 }
