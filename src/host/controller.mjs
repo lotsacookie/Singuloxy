@@ -273,6 +273,13 @@ export class ProxyFrame {
     console.log("site settings:", settings);
 
     this.emit_progress(0.4, "Preparing page");
+    let ready_timer = setTimeout(() => {
+      this.emit_progress(1, "Ready");
+      try {
+        this.on_ready();
+      }
+      catch {}
+    }, 25000);
     await rpc.wait_on_frame(this.iframe);
     let msg_channel = new MessageChannel();
     this.rpc_target.set_target(msg_channel.port1);
@@ -310,6 +317,7 @@ export class ProxyFrame {
         version: version
       });
     }
+    clearTimeout(ready_timer);
     this.iframe.style.backgroundColor = "unset";
     this.on_load();
     this.emit_progress(1, "Ready");
@@ -341,6 +349,12 @@ rpc.rpc_handlers["progress"] = async (frame_id, value, text) => {
   let frame = iframes[frame_id];
   if (!frame) return;
   frame.emit_progress(value, typeof text === "string" ? text.slice(0, 80) : "");
+  if (value >= 1) {
+    try {
+      frame.on_ready();
+    }
+    catch {}
+  }
 }
 
 rpc.rpc_handlers["page_info"] = async (frame_id, title) => {

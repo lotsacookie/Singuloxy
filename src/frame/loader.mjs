@@ -333,29 +333,33 @@ async function load_html(options) {
   root.style.visibility = "hidden";
   setTimeout(reveal, 30000);
   report(0.85, "Running scripts");
-  if (site_settings.allow_js) {
-    evaluate_scripts();
-    await evaluate_modules();
+  try {
+    if (site_settings.allow_js) {
+      evaluate_scripts();
+      await evaluate_modules();
+    }
+    report(0.93, "Finishing up");
+
+    is_loaded = true;
+    watch_title();
+    install_click_handler();
+    install_form_handler();
+    install_flush_handlers();
+
+    set_ready_state("interactive");
+    fire_document_event("readystatechange");
+    fire_document_event("DOMContentLoaded", true);
+
+    await Promise.race([settle(), new Promise((resolve) => setTimeout(resolve, 5000))]);
+
+    set_ready_state("complete");
+    fire_document_event("readystatechange");
+    ctx.window.dispatchEvent(new Event("load"));
   }
-  report(0.93, "Finishing up");
-
-  is_loaded = true;
-  watch_title();
-  install_click_handler();
-  install_form_handler();
-  install_flush_handlers();
-
-  set_ready_state("interactive");
-  fire_document_event("readystatechange");
-  fire_document_event("DOMContentLoaded", true);
-
-  await settle();
-
-  set_ready_state("complete");
-  fire_document_event("readystatechange");
-  ctx.window.dispatchEvent(new Event("load"));
-  report(1, "Ready");
-  reveal();
+  finally {
+    report(1, "Ready");
+    reveal();
+  }
 }
 
 async function get_favicon() {
