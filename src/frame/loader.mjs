@@ -16,21 +16,8 @@ export const cookies = rpc.create_rpc_wrapper(rpc.host, "cookies");
 const page_info_rpc = rpc.create_rpc_wrapper(rpc.host, "page_info");
 
 const progress_rpc = rpc.create_rpc_wrapper(rpc.host, "progress");
-let ui_target = null;
 
 function report(value, text) {
-  try {
-    let target = ui_target || document;
-    let fill = target.querySelector(".ld-fill");
-    let status = target.querySelector(".ld-status");
-    if (fill) {
-      fill.style.animation = "none";
-      fill.style.transition = "transform .4s cubic-bezier(.22,1,.36,1)";
-      fill.style.transform = `scaleX(${Math.max(0, Math.min(1, value))})`;
-    }
-    if (status) status.textContent = `${text} ${Math.round(value * 100)}%`;
-  }
-  catch {}
   try {
     progress_rpc(frame_id, value, text);
   }
@@ -271,7 +258,6 @@ async function load_html(options) {
   globalThis.__dynamic_import__ = rewrite.module_dynamic_import;
 
   if (options.error) {
-    document.getElementById("loading_text").style.display = "none";
     document.getElementById("error_div").style.display = "initial";
     document.getElementById("error_msg").innerText = options.error;
     document.getElementById("version_text").innerText = `Sandstone v${version.ver} (${version.hash})`;
@@ -332,22 +318,6 @@ async function load_html(options) {
   }
 
   console.log("done downloading page");
-  let overlay = null;
-  try {
-    let source = document.getElementById("loading_text");
-    let sheet = document.querySelector("style");
-    if (source && sheet) {
-      overlay = document.createElement("div");
-      overlay.style.cssText = "position:fixed;inset:0;z-index:2147483647;visibility:visible;background:transparent;pointer-events:auto";
-      let shadow = overlay.attachShadow({mode: "closed"});
-      shadow.appendChild(sheet.cloneNode(true));
-      shadow.appendChild(source.cloneNode(true));
-      ui_target = shadow;
-    }
-  }
-  catch {
-    overlay = null;
-  }
   document.documentElement.replaceWith(html.documentElement);
   let root = html.documentElement;
   let previous_visibility = root.style.visibility;
@@ -357,15 +327,11 @@ async function load_html(options) {
     revealed = true;
     try {
       root.style.visibility = previous_visibility;
-      if (overlay) overlay.remove();
     }
     catch {}
   };
-  if (overlay) {
-    root.style.visibility = "hidden";
-    root.appendChild(overlay);
-    setTimeout(reveal, 30000);
-  }
+  root.style.visibility = "hidden";
+  setTimeout(reveal, 30000);
   report(0.85, "Running scripts");
   if (site_settings.allow_js) {
     evaluate_scripts();
