@@ -20,6 +20,9 @@ const rows = [];
 const queue = [{ url: start, depth: 0, from: "" }];
 let fetched = 0;
 let engine_base = null;
+const asset_bases = new Set();
+const ENGINE_FILES = ["WasmPlayer.js", "WebClient.js", "WebClient.wasm", "WebFlags.json", "WebClient.metadata.json"];
+const WEBCLIENT_FILES = ["WasmLoader.js", "stub.js"];
 
 function note(url, from) {
   if (!discovered.has(url)) discovered.set(url, from);
@@ -29,8 +32,25 @@ function extract(text, base) {
   const found = new Set();
   const absolute = /https?:\/\/[A-Za-z0-9.\-]+(?::\d+)?(?:\/[^\s"'`<>\\)(]*)?/g;
   for (const match of text.matchAll(absolute)) found.add(match[0].replace(/[,;.]+$/, ""));
+  for (const match of text.matchAll(/\/[0-9a-f]{40}\/assets/g)) {
+    try {
+      asset_bases.add(new URL(base).origin + match[0]);
+    }
+    catch {}
+  }
+  for (const root of asset_bases) {
+    for (const name of WEBCLIENT_FILES) found.add(`${root}/webclient/${name}`);
+  }
+  const versions = text.match(/version-[a-f0-9]{16}/g);
+  if (versions && !engine_base) engine_base = `https://setup.rbxcdn.com/webclient/${versions[0]}-RobloxWebClient`;
+  if (engine_base) {
+    for (const name of ENGINE_FILES) found.add(`${engine_base}/${name}`);
+  }
   const relative = /["'`]((?:\.{0,2}\/)?[A-Za-z0-9_\-.\/@%+]+\.(?:js|mjs|json|wasm|css|data|html|txt|map|bin|br))(?:\?[^"'`]*)?["'`]/g;
   for (const match of text.matchAll(relative)) {
+    if (match[1].startsWith("/")) {
+      for (const root of asset_bases) found.add(root + match[1]);
+    }
     const candidates = [base];
     if (engine_base) candidates.push(engine_base + "/");
     for (const root of candidates) {
