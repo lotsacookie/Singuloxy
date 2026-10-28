@@ -245,6 +245,27 @@ function host_of(url) {
   }
 }
 
+const ROBLOX_CDN_HOST = /(^|\.)rbxcdn\.com$/i;
+
+function is_roblox_cdn(url) {
+  return ROBLOX_CDN_HOST.test(host_of(url));
+}
+
+function strip_headers(options, names) {
+  let headers = {...(options?.headers || {})};
+  for (let key of Object.keys(headers)) {
+    if (names.includes(key.toLowerCase())) delete headers[key];
+  }
+  return {...(options || {}), headers: headers};
+}
+
+function with_roblox_headers(options) {
+  let cleaned = strip_headers(options, ["origin", "referer"]);
+  cleaned.headers["Origin"] = "https://www.roblox.com";
+  cleaned.headers["Referer"] = "https://www.roblox.com/";
+  return cleaned;
+}
+
 async function wait_for_cooldown() {
   let remaining = cooldown_until - Date.now();
   while (remaining > 0) {
@@ -972,6 +993,9 @@ async function fetch_with_retry(url, options, ignore_block = false, use_session 
   let method = String(options?.method || "GET").toUpperCase();
   let can_retry = method === "GET" || method === "HEAD";
   let attempt = 0;
+  let roblox_cdn = is_roblox_cdn(url);
+  let retried_forbidden = false;
+  if (roblox_cdn) options = with_roblox_headers(options);
 
   while (true) {
     if (!ignore_block && is_host_blocked(url)) {
@@ -988,6 +1012,13 @@ async function fetch_with_retry(url, options, ignore_block = false, use_session 
       if (probe) {
         wisp.probing = false;
         probe = false;
+      }
+      if (response.status === 403 && roblox_cdn && !retried_forbidden) {
+        retried_forbidden = true;
+        discard_response(response);
+        options = strip_headers(options, ["origin", "referer"]);
+        quiet_warn("sandstone host: roblox cdn returned 403, retrying without origin and referer:", url);
+        continue;
       }
       note_success(url);
       return response;
@@ -1764,7 +1795,7 @@ rpc_handlers["fetch"] = async function(url, options) {
             discard_response(attempt);
           }
         }
-        else if (attempt.status === 416) {
+        else if (attempt.status === 416 || attempt.status >= 400) {
           discard_response(attempt);
         }
         else {
