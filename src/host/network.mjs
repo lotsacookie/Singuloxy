@@ -259,13 +259,6 @@ function strip_headers(options, names) {
   return {...(options || {}), headers: headers};
 }
 
-function with_roblox_headers(options) {
-  let cleaned = strip_headers(options, ["origin", "referer"]);
-  cleaned.headers["Origin"] = "https://www.roblox.com";
-  cleaned.headers["Referer"] = "https://www.roblox.com/";
-  return cleaned;
-}
-
 async function wait_for_cooldown() {
   let remaining = cooldown_until - Date.now();
   while (remaining > 0) {
@@ -995,7 +988,6 @@ async function fetch_with_retry(url, options, ignore_block = false, use_session 
   let attempt = 0;
   let roblox_cdn = is_roblox_cdn(url);
   let retried_forbidden = false;
-  if (roblox_cdn) options = with_roblox_headers(options);
 
   while (true) {
     if (!ignore_block && is_host_blocked(url)) {
