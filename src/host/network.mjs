@@ -26,7 +26,10 @@ const COALESCE_BYTES = 2 * 1024 * 1024;
 const COALESCE_WAIT_MS = 8;
 const STREAM_IDLE_MS = 2 * 60 * 1000;
 const EVICT_IDLE_MS = 30 * 1000;
-const MAX_OPEN_STREAMS = 128;
+const MAX_OPEN_STREAMS = 256;
+const LARGE_STREAM_BYTES = 8 * 1024 * 1024;
+const LARGE_STREAM_IDLE_MS = 15 * 60 * 1000;
+const MAX_CLOSED_MEMORY = 4096;
 const HOST_FAIL_THRESHOLD = 3;
 const HOST_BLOCK_MS = 30 * 1000;
 const TLS_HOST_FAIL_THRESHOLD = 6;
@@ -95,6 +98,7 @@ const BENCH_TARGETS = [
 const LARGE_FILE_PATTERN = /\.(zip|7z|rar|tar|tgz|gz|xz|bz2|pk3|pak|pck|wasm|data|bin|iso|img|mp4|webm|mkv|unityweb|br|apk|exe|dmg|msi|jar|rom|nes|sfc|smc|gba|gbc|gb|nds|n64|z64|v64|nsp|xci|3ds|cia|chd|cue|vpk)([?#]|$)|\.part\d{2,}([?#]|$)/i;
 
 const streams = {};
+const closed_streams = new Map();
 const segmented_hosts = new Set();
 const host_health = new Map();
 const host_active = new Map();
@@ -1522,6 +1526,8 @@ function end_stream(stream_id, reason = "done") {
   if (!stream) return;
   delete streams[stream_id];
   stream.ended = stream.ended || reason;
+  closed_streams.set(stream_id, stream.ended);
+  if (closed_streams.size > MAX_CLOSED_MEMORY) closed_streams.delete(closed_streams.keys().next().value);
   try {
     stream.reader.cancel().catch(() => {});
   }
@@ -1535,12 +1541,16 @@ export function end_streams_for(owners) {
   }
 }
 
+function is_large_stream(stream) {
+  return (stream.expected || 0) >= LARGE_STREAM_BYTES || stream.received >= LARGE_STREAM_BYTES;
+}
+
 function enforce_stream_cap() {
   let ids = Object.keys(streams);
   if (ids.length <= MAX_OPEN_STREAMS) return;
   let now = Date.now();
   let candidates = ids
-    .filter((id) => !streams[id].reading && now - streams[id].touched > EVICT_IDLE_MS)
+    .filter((id) => !streams[id].reading && !is_large_stream(streams[id]) && now - streams[id].touched > EVICT_IDLE_MS)
     .sort((a, b) => streams[a].touched - streams[b].touched);
   for (let id of candidates) {
     if (Object.keys(streams).length <= MAX_OPEN_STREAMS) break;
@@ -1932,7 +1942,11 @@ rpc_handlers["fetch"] = async function(url, options) {
 
 rpc_handlers["fetch_read"] = async function(stream_id) {
   let stream = streams[stream_id];
-  if (!stream) return null;
+  if (!stream) {
+    let reason = closed_streams.get(stream_id);
+    if (reason === undefined || reason === "done" || reason === "cancelled") return null;
+    throw new Error("Request failed with error code 18: download stream was closed early (" + reason + ")");
+  }
   stream.touched = Date.now();
   stream.reading = true;
 
@@ -2014,7 +2028,7 @@ rpc_handlers["fetch_cancel"] = function(stream_id) {
 setInterval(() => {
   let now = Date.now();
   for (let [stream_id, stream] of Object.entries(streams)) {
-    if (!stream.reading && now - stream.touched > STREAM_IDLE_MS) end_stream(stream_id, "evicted");
+    if (!stream.reading && now - stream.touched > (is_large_stream(stream) ? LARGE_STREAM_IDLE_MS : STREAM_IDLE_MS)) end_stream(stream_id, "evicted");
   }
 }, 15000);
 

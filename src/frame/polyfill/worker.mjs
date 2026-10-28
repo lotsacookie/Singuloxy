@@ -91,6 +91,7 @@ export class FakeWorker extends EventTarget {
       ${loader.runtime_src}
       sandstone_frame.loader.set_url("${loader.url}");
       sandstone_frame.network.set_worker_base(${worker_base_json});
+      sandstone_frame.loader.set_worker_url(${worker_base_json});
       sandstone_frame.loader.set_frame_id("${worker_id}");
       sandstone_frame.context.update_ctx();
       sandstone_frame.rpc.set_on_attach(() => {
@@ -154,6 +155,7 @@ export class FakeWorker extends EventTarget {
       ${cache_substr}
       sandstone_frame.loader.set_url(${JSON.stringify(loader.url)});
       sandstone_frame.network.set_worker_base(${worker_base_json});
+      sandstone_frame.loader.set_worker_url(${worker_base_json});
       sandstone_frame.loader.set_frame_id("${worker_id}");
       sandstone_frame.network.enable_network();
       sandstone_frame.context.update_ctx();

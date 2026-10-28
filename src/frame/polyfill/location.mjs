@@ -32,7 +32,7 @@ function navigate_fragment(target) {
 
 export class FakeLocation {
   constructor() {
-    internal = new URL(loader.url);
+    internal = new URL(loader.worker_url || loader.url);
     
     for (let key in internal) {
       if (key === "toString") continue;

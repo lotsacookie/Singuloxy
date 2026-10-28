@@ -132,6 +132,15 @@ function watch_title() {
 
 export const runtime_src = self.document?.currentScript?.innerHTML;
 export let url;
+export let worker_url = null;
+
+export function set_worker_url(value) {
+  try {
+    let parsed = new URL(String(value));
+    if (parsed.protocol === "http:" || parsed.protocol === "https:") worker_url = parsed.href;
+  }
+  catch {}
+}
 export let frame_id;
 export let frame_html;
 export let version;

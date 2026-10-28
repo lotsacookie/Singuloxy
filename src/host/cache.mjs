@@ -1,4 +1,5 @@
-const DB_NAME = "singuloxy-cache";
+const DB_NAME = "singuloxy-cache-v2";
+const OLD_DB_NAME = "singuloxy-cache";
 const DB_VERSION = 1;
 const META = "meta";
 const BLOBS = "blobs";
@@ -45,6 +46,10 @@ function open_db() {
     }
     let request;
     try {
+      try {
+        indexedDB.deleteDatabase(OLD_DB_NAME);
+      }
+      catch {}
       request = indexedDB.open(DB_NAME, DB_VERSION);
     }
     catch {
@@ -408,7 +413,7 @@ export function wrap_reader(reader, store_plan) {
       if (abandoned || finished) return result;
       if (result.done) {
         finished = true;
-        let complete = !store_plan.exact || store_plan.expected === null || received === store_plan.expected;
+        let complete = store_plan.expected === null ? received < options.large_bytes : (!store_plan.exact || received === store_plan.expected);
         if (complete && received >= options.min_entry_bytes) {
           commit(store_plan, new Blob(parts), received).catch(() => {});
         }
