@@ -292,6 +292,9 @@ function install_click_handler() {
 function install_flush_handlers() {
   globalThis.addEventListener("pagehide", flush_state);
   globalThis.addEventListener("beforeunload", flush_state);
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "hidden") flush_state();
+  });
 }
 
 function fire_document_event(type, bubbles = false) {

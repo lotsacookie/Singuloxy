@@ -3,6 +3,7 @@ import * as response_cache from "./cache.mjs";
 import { iframes } from "./controller.mjs";
 import { rpc_handlers } from "../rpc.mjs";
 import { libcurl } from "libcurl.js/bundled";
+import { load_jar, create_jar_saver } from "./jar_store.mjs";
 
 export const ws_connections = {};
 export let session = null;
@@ -667,9 +668,25 @@ export async function test_hosts(urls = DEFAULT_TEST_URLS) {
   return results;
 }
 
+let save_jar = () => false;
+
 function make_session() {
+  let created = null;
   try {
-    return new libcurl.HTTPSession({enable_cookies: true});
+    let stored = load_jar(localStorage);
+    try {
+      created = new libcurl.HTTPSession(stored ? {enable_cookies: true, cookie_jar: stored} : {enable_cookies: true});
+    }
+    catch {
+      created = new libcurl.HTTPSession({enable_cookies: true});
+    }
+    save_jar = create_jar_saver(localStorage, () => created.export_cookies?.() || "");
+    setInterval(() => save_jar(), 2000);
+    for (let name of ["pagehide", "beforeunload"]) window.addEventListener(name, () => save_jar());
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState === "hidden") save_jar();
+    });
+    return created;
   }
   catch (e) {
     quiet_warn("sandstone host: cookie-enabled session failed, using a plain session:", error_message(e));
