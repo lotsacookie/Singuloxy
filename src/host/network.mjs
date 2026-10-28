@@ -218,7 +218,9 @@ const BLOCKED_URL_PATTERNS = [
   /^https:\/\/roblox-poc\.global\.ssl\.fastly\.net\/test-50kb\.png/i,
   /^https:\/\/lms-[a-z0-9-]+\.roblox\.com\/1x1\.png/i,
   /^https:\/\/t\.co\/i\/adsct/i,
-  /^https:\/\/www\.facebook\.com\/tr[/?]/i
+  /^https:\/\/www\.facebook\.com\/tr[/?]/i,
+  /^https:\/\/ecsv2\.roblox\.com\//i,
+  /^https:\/\/[a-z0-9.-]+\.ingest(\.[a-z]+)?\.sentry\.io\//i
 ];
 
 const GIF_1X1 = Uint8Array.from(
