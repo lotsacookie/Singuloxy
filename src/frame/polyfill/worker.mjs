@@ -5,6 +5,7 @@ import * as util from "../../util.mjs";
 import { scan_import_scripts } from "./worker_scan.mjs";
 
 const DISCOVERY_TIMEOUT_MS = 10000;
+const discovery_cache = new Map();
 
 function clone_worker_event(event) {
   if (event.type === "error") {
@@ -81,12 +82,8 @@ export class FakeWorker extends EventTarget {
     });
   }
 
-  async #load_worker() {
-    let response = await network.fetch(this.#url);
-    let worker_text = await response.text();
-    let worker_js = JSON.stringify(worker_text);
+  async #discover(worker_text, worker_js, worker_base_json) {
     let worker_id = "" + Math.random();
-    let worker_base_json = JSON.stringify(new URL(String(this.#url), document_base()).href);
     let temp_script = `
       ${loader.runtime_src}
       sandstone_frame.loader.set_url("${loader.url}");
@@ -106,7 +103,6 @@ export class FakeWorker extends EventTarget {
     let temp_blob = new Blob([temp_script], {type: "text/javascript"});
     let temp_blob_url = URL.createObjectURL(temp_blob);
 
-    if (this.#terminated) return;
     let temp_worker = new Worker(temp_blob_url, {...this.#options, type: "classic"});
     this.#worker_attach(temp_worker);
     let recorded_urls = new Set();
@@ -142,6 +138,27 @@ export class FakeWorker extends EventTarget {
       })());
     }
     await util.run_parallel(promises);
+
+    return {recorded_urls, script_data};
+  }
+
+  async #load_worker() {
+    let response = await network.fetch(this.#url);
+    let worker_text = await response.text();
+    let worker_js = JSON.stringify(worker_text);
+    let worker_id = "" + Math.random();
+    let worker_base_json = JSON.stringify(new URL(String(this.#url), document_base()).href);
+
+    // Emscripten spawns many pthread workers from the same script. Discover its
+    // dependencies once and share the result, instead of running a 10s probe each time.
+    let discovered = discovery_cache.get(worker_base_json);
+    if (!discovered) {
+      discovered = this.#discover(worker_text, worker_js, worker_base_json);
+      discovery_cache.set(worker_base_json, discovered);
+      discovered.catch(() => discovery_cache.delete(worker_base_json));
+    }
+    let {recorded_urls, script_data} = await discovered;
+    if (this.#terminated) return;
 
     let cache_puts = [];
     for (let url of recorded_urls) {
