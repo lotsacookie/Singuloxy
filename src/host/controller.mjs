@@ -132,7 +132,7 @@ export class ProxyFrame {
     this.iframe = document.createElement("iframe");
     this.iframe.sandbox = "allow-scripts allow-forms allow-modals allow-pointer-lock";
     this.iframe.allowFullscreen = true;
-    this.iframe.allow = "cross-origin-isolated; encrypted-media; autoplay; picture-in-picture; clipboard-write; web-share; gamepad; accelerometer; gyroscope; magnetometer";    this.iframe.setAttribute("frame-id", this.id);
+    this.iframe.allow = "cross-origin-isolated; fullscreen; pointer-lock; keyboard-map; clipboard-read; screen-wake-lock; encrypted-media; autoplay; picture-in-picture; clipboard-write; web-share; gamepad; accelerometer; gyroscope; magnetometer";    this.iframe.setAttribute("frame-id", this.id);
 
     iframes[this.id] = this;
     this.rpc_target = new rpc.RPCTarget();
