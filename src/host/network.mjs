@@ -251,6 +251,14 @@ function is_roblox_cdn(url) {
   return ROBLOX_CDN_HOST.test(host_of(url));
 }
 
+function keep_headers(options, names) {
+  let headers = {};
+  for (let [key, value] of Object.entries(options?.headers || {})) {
+    if (names.includes(key.toLowerCase())) headers[key] = value;
+  }
+  return {...(options || {}), headers: headers};
+}
+
 function strip_headers(options, names) {
   let headers = {...(options?.headers || {})};
   for (let key of Object.keys(headers)) {
@@ -987,7 +995,7 @@ async function fetch_with_retry(url, options, ignore_block = false, use_session 
   let can_retry = method === "GET" || method === "HEAD";
   let attempt = 0;
   let roblox_cdn = is_roblox_cdn(url);
-  let retried_forbidden = false;
+  let forbidden_retries = 0;
 
   while (true) {
     if (!ignore_block && is_host_blocked(url)) {
@@ -1005,11 +1013,22 @@ async function fetch_with_retry(url, options, ignore_block = false, use_session 
         wisp.probing = false;
         probe = false;
       }
-      if (response.status === 403 && roblox_cdn && !retried_forbidden) {
-        retried_forbidden = true;
+      if (response.status === 403 && roblox_cdn && forbidden_retries < 2) {
+        forbidden_retries++;
+        let sent = Object.keys(options?.headers || {}).join(",");
+        let got = ["server", "via", "x-cache", "x-amz-request-id", "x-amz-cf-id", "content-type"]
+          .map((name) => `${name}=${response.headers.get(name) || ""}`)
+          .join(" ");
+        let snippet = "";
+        try {
+          snippet = (await response.text()).slice(0, 200);
+        }
+        catch {}
+        quiet_warn(`sandstone host: roblox cdn 403 (attempt ${forbidden_retries}) ${method} ${url} sent=[${sent}] credentials=${options?.credentials || ""} got=[${got}] body=${snippet}`);
         discard_response(response);
-        options = strip_headers(options, ["origin", "referer"]);
-        quiet_warn("sandstone host: roblox cdn returned 403, retrying without origin and referer:", url);
+        options = forbidden_retries === 1
+          ? strip_headers(options, ["origin", "referer"])
+          : keep_headers(options, ["user-agent", "range"]);
         continue;
       }
       note_success(url);
