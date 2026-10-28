@@ -6,6 +6,11 @@ const app = express();
 const port = process.env.PORT || 5001;
 const host = process.env.HOST || "0.0.0.0";
 
+app.use((req, res, next) => {
+  res.set("Cross-Origin-Opener-Policy", "same-origin");
+  res.set("Cross-Origin-Embedder-Policy", "credentialless");
+  next();
+});
 app.use(morgan("combined"));
 app.use(express.static("./"));
 
