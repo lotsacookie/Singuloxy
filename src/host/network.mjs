@@ -259,6 +259,26 @@ function keep_headers(options, names) {
   return {...(options || {}), headers: headers};
 }
 
+function with_roblox_referer(options) {
+  let headers = {...(options?.headers || {})};
+  let current = "";
+  for (let key of Object.keys(headers)) {
+    if (key.toLowerCase() === "referer") {
+      current = String(headers[key]);
+      delete headers[key];
+    }
+  }
+  let valid = /^https:\/\/([a-z0-9-]+\.)*roblox\.com\//i.test(current);
+  headers["Referer"] = valid ? current : "https://play.roblox.com/";
+  return {...(options || {}), headers: headers};
+}
+
+function with_header(options, name, value) {
+  let cleaned = strip_headers(options, [name.toLowerCase()]);
+  cleaned.headers[name] = value;
+  return cleaned;
+}
+
 function strip_headers(options, names) {
   let headers = {...(options?.headers || {})};
   for (let key of Object.keys(headers)) {
@@ -996,6 +1016,7 @@ async function fetch_with_retry(url, options, ignore_block = false, use_session 
   let attempt = 0;
   let roblox_cdn = is_roblox_cdn(url);
   let forbidden_retries = 0;
+  if (roblox_cdn) options = with_roblox_referer(options);
 
   while (true) {
     if (!ignore_block && is_host_blocked(url)) {
@@ -1013,9 +1034,11 @@ async function fetch_with_retry(url, options, ignore_block = false, use_session 
         wisp.probing = false;
         probe = false;
       }
-      if (response.status === 403 && roblox_cdn && forbidden_retries < 2) {
+      if (response.status === 403 && roblox_cdn && forbidden_retries < 3) {
         forbidden_retries++;
-        let sent = Object.keys(options?.headers || {}).join(",");
+        let sent = Object.entries(options?.headers || {})
+          .map(([key, value]) => /^(referer|origin)$/i.test(key) ? `${key}=${value}` : key)
+          .join(",");
         let got = ["server", "via", "x-cache", "x-amz-request-id", "x-amz-cf-id", "content-type"]
           .map((name) => `${name}=${response.headers.get(name) || ""}`)
           .join(" ");
@@ -1027,8 +1050,10 @@ async function fetch_with_retry(url, options, ignore_block = false, use_session 
         quiet_warn(`sandstone host: roblox cdn 403 (attempt ${forbidden_retries}) ${method} ${url} sent=[${sent}] credentials=${options?.credentials || ""} got=[${got}] body=${snippet}`);
         discard_response(response);
         options = forbidden_retries === 1
-          ? strip_headers(options, ["origin", "referer"])
-          : keep_headers(options, ["user-agent", "range"]);
+          ? strip_headers(options, ["origin"])
+          : forbidden_retries === 2
+            ? with_header(options, "Origin", "https://play.roblox.com")
+            : keep_headers(options, ["user-agent", "range"]);
         continue;
       }
       note_success(url);
