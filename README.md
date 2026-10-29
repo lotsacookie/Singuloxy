@@ -90,3 +90,6 @@ GNU Affero General Public License for more details.
 You should have received a copy of the GNU Affero General Public License
 along with this program.  If not, see <https://www.gnu.org/licenses/>.
 ```
+
+## Multithreaded WASM (Roblox web client, Unity threads)
+The host page must be cross-origin isolated or workers fail with `SharedArrayBuffer transfer requires self.crossOriginIsolated`. If you can't set `COOP: same-origin` + `COEP: credentialless` headers, copy `example/coi-sw.js` and `example/coi-register.js` next to your page and add `<script src="coi-register.js"></script>` to `<head>` before loading sandstone. The service worker file must be same-origin (it can't be loaded from jsDelivr).
