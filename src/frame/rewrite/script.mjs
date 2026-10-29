@@ -172,7 +172,7 @@ export async function rewrite_script(script_element) {
     if (!script_text) return;
     if (!is_dynamic) {
       pending_scripts.push([num, script_element, script_text]);
-      await prewarm(script_element, script_text);
+      prewarm(script_element, script_text);
       return;
     }
     script_element.textContent = parser.rewrite_js(script_text, false, "(dynamic inline script)");
@@ -188,6 +188,6 @@ export async function rewrite_script(script_element) {
   }
   else if (script_text) {
     pending_scripts.push([num, script_element, script_text]);
-    await prewarm(script_element, script_text);
+    prewarm(script_element, script_text);
   }
 }

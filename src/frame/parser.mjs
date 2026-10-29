@@ -162,6 +162,16 @@ function is_non_reference(node, parent) {
   }
 }
 
+let ctx_var_set = new Set();
+let ctx_var_set_size = -1;
+function is_ctx_var(name) {
+  if (ctx_var_set_size !== ctx_vars.length) {
+    ctx_var_set = new Set(ctx_vars);
+    ctx_var_set_size = ctx_vars.length;
+  }
+  return ctx_var_set.has(name);
+}
+
 class ASTVisitor {
   constructor(ast) {
     this.ast = ast;
@@ -218,7 +228,7 @@ class ASTVisitor {
       return;
     }
 
-    if (!ctx_vars.includes(node.name)) 
+    if (!is_ctx_var(node.name)) 
       return;
 
     let simple = false;

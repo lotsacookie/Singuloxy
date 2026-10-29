@@ -177,7 +177,7 @@ function eval_script(script_element, script_text) {
   script_element.dispatchEvent(new Event("load"));
 }
 
-const SLICE_MS = 12;
+const SLICE_MS = 40;
 
 async function evaluate_scripts() {
   pending_scripts.sort((a, b) => a[0] - b[0]);
