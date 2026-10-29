@@ -74,7 +74,13 @@ export class FakeWorker extends EventTarget {
     }
 
     this.#load_worker().catch((e) => {
-      console.error("sandstone: worker failed to start", url, e);
+      if (e && e.name === "DataCloneError" && !self.crossOriginIsolated) {
+        if (!self.__sandstone_isolation_warned) {
+          self.__sandstone_isolation_warned = true;
+          console.error("sandstone: the top-level page is not cross-origin isolated, so shared-memory (pthread) workers cannot start. Serve the host page and the embed that loads sandstone with 'Cross-Origin-Opener-Policy: same-origin' and 'Cross-Origin-Embedder-Policy: credentialless' (see docs/cross-origin-isolation.md).");
+        }
+      }
+      else console.error("sandstone: worker failed to start", url, e);
       try {
         this.onerror(new ErrorEvent("error", {message: String(e)}));
       }
