@@ -1056,6 +1056,14 @@ async function fetch_with_retry(url, options, ignore_block = false, use_session 
             : keep_headers(options, ["user-agent", "range"]);
         continue;
       }
+      if (response.status >= 400 && /(^|\.)(roblox\.com|rbxcdn\.com)$/i.test(host_of(url))) {
+        let status_path = "";
+        try {
+          status_path = new URL(url).pathname;
+        }
+        catch {}
+        log_throttled("http", host_of(url) + status_path, `sandstone host: http ${response.status} ${method} ${url}`);
+      }
       note_success(url);
       return response;
     }

@@ -6,6 +6,10 @@ on:
         description: Page to start crawling from
         required: true
         default: https://play.roblox.com/games/start
+      out_name:
+        description: Folder name under log/ for the results
+        required: true
+        default: crawl
 
 jobs:
   crawl:
@@ -23,16 +27,16 @@ jobs:
 
       - name: crawl
         run: |
-          rm -rf log/crawl
-          node .github/scripts/crawl.mjs "${{ inputs.start_url }}" log/crawl
+          rm -rf "log/${{ inputs.out_name }}"
+          node .github/scripts/crawl.mjs "${{ inputs.start_url }}" "log/${{ inputs.out_name }}"
 
       - name: summary
         run: |
           {
             echo "## crawl index"
             echo '```'
-            cat log/crawl/engine-base.txt
-            cut -f1-5 log/crawl/index.tsv | head -c 60000
+            cat "log/${{ inputs.out_name }}/engine-base.txt"
+            cut -f1-5 "log/${{ inputs.out_name }}/index.tsv" | head -c 60000
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
@@ -40,7 +44,7 @@ jobs:
         run: |
           git config user.name github-actions
           git config user.email github-actions@users.noreply.github.com
-          git add -A log/crawl
+          git add -A "log/${{ inputs.out_name }}"
           git commit -m "crawl results" || echo "nothing to commit"
           git pull --rebase origin ${{ github.ref_name }}
           git push origin HEAD:${{ github.ref_name }}
