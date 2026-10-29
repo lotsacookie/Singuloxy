@@ -275,8 +275,46 @@ function source_url_suffix(label) {
   return "\n//# sourceURL=" + label.replace(/[\s\u0000-\u001f]/g, "");
 }
 
+const REWRITE_CACHE_MAX_BYTES = 48 * 1024 * 1024;
+const rewrite_caches = [new Map(), new Map()];
+let rewrite_cache_bytes = 0;
+
+function cached_rewrite(js, is_module, label) {
+  let cache = rewrite_caches[is_module ? 1 : 0];
+  let hit = cache.get(js);
+  if (hit !== undefined) {
+    cache.delete(js);
+    cache.set(js, hit);
+    return hit;
+  }
+  let result = rewrite_js_inner(js, is_module, label);
+  if (js.length * 2 <= REWRITE_CACHE_MAX_BYTES / 4) {
+    cache.set(js, result);
+    rewrite_cache_bytes += (js.length + result.length) * 2;
+    while (rewrite_cache_bytes > REWRITE_CACHE_MAX_BYTES) {
+      let victim = rewrite_caches[0].size >= rewrite_caches[1].size ? rewrite_caches[0] : rewrite_caches[1];
+      let oldest = victim.keys().next();
+      if (oldest.done) break;
+      rewrite_cache_bytes -= (oldest.value.length + victim.get(oldest.value).length) * 2;
+      victim.delete(oldest.value);
+    }
+  }
+  return result;
+}
+
+function fast_can_parse(js, is_module) {
+  if (!is_module && !MODULE_SYNTAX.test(js)) {
+    try {
+      new AsyncFunction(js);
+      return true;
+    }
+    catch {}
+  }
+  return can_parse(js, is_module);
+}
+
 export function rewrite_js(js, is_module = false, label = "") {
-  let output = rewrite_js_inner(js, is_module, label);
+  let output = cached_rewrite(js, is_module, label);
   let suffix = source_url_suffix(label);
   return suffix ? output + suffix : output;
 }
@@ -317,7 +355,7 @@ function rewrite_js_inner(js, is_module = false, label = "") {
   rewritten_js += js.substring(prev_offset);
 
   let result = rewritten_js || js;
-  if (ast_visitor.rewrites.length > 0 && js.length <= MAX_VALIDATE_LENGTH && !can_parse(result, is_module)) {
+  if (ast_visitor.rewrites.length > 0 && js.length <= MAX_VALIDATE_LENGTH && !fast_can_parse(result, is_module)) {
     console.warn(`sandstone: rewriting produced invalid JS, script left UNREWRITTEN (it will bypass the proxy): ${label || "(inline or unnamed script)"}`);
     return js;
   }

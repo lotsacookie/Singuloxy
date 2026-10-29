@@ -1,4 +1,4 @@
-import { quiet_error, quiet_warn } from "../../util.mjs";
+import { quiet_error, quiet_warn, yield_to_main } from "../../util.mjs";
 import * as network from "../network.mjs";
 import * as loader from "../loader.mjs";
 import * as parser from "../parser.mjs";
@@ -50,6 +50,14 @@ export function execute_script(script_element, script_text) {
   }
   script.remove();
   swap_current_script(previous);
+}
+
+async function prewarm(script_element, text) {
+  try {
+    await yield_to_main();
+    parser.rewrite_js(text, false, script_element.getAttribute("__src") || "");
+  }
+  catch {}
 }
 
 function sleep(ms) {
@@ -164,6 +172,7 @@ export async function rewrite_script(script_element) {
     if (!script_text) return;
     if (!is_dynamic) {
       pending_scripts.push([num, script_element, script_text]);
+      await prewarm(script_element, script_text);
       return;
     }
     script_element.textContent = parser.rewrite_js(script_text, false, "(dynamic inline script)");
@@ -179,5 +188,6 @@ export async function rewrite_script(script_element) {
   }
   else if (script_text) {
     pending_scripts.push([num, script_element, script_text]);
+    await prewarm(script_element, script_text);
   }
 }

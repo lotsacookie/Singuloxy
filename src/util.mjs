@@ -86,3 +86,8 @@ export function quiet_warn(...args) {
   if (is_ignorable_error(...args)) return;
   console.warn(...args);
 }
+
+export function yield_to_main() {
+  if (globalThis.scheduler && typeof globalThis.scheduler.yield === "function") return globalThis.scheduler.yield();
+  return new Promise((resolve) => setTimeout(resolve, 0));
+}

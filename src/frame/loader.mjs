@@ -1,3 +1,4 @@
+import { yield_to_main } from "../util.mjs";
 import * as rpc from "../rpc.mjs";
 import * as rewrite from "./rewrite/index.mjs";
 import * as network from "./network.mjs";
@@ -176,21 +177,32 @@ function eval_script(script_element, script_text) {
   script_element.dispatchEvent(new Event("load"));
 }
 
-function evaluate_scripts() {
+const SLICE_MS = 12;
+
+async function evaluate_scripts() {
   pending_scripts.sort((a, b) => a[0] - b[0]);
   let deferred = [];
-  for (let [num, script_element, script_text] of pending_scripts) {
+  let slice_start = performance.now();
+  let maybe_yield = async () => {
+    if (performance.now() - slice_start < SLICE_MS) return;
+    await yield_to_main();
+    slice_start = performance.now();
+  };
+  let queue = pending_scripts.slice();
+  pending_scripts.length = 0;
+  for (let [num, script_element, script_text] of queue) {
     if (script_element.defer || script_element.async) {
       deferred.push([script_element, script_text])
     }
     else {
       eval_script(script_element, script_text);
+      await maybe_yield();
     }
   }
-  pending_scripts.length = 0;
 
   for (let [script_element, script_text] of deferred) {
     eval_script(script_element, script_text);
+    await maybe_yield();
   }
 }
 
@@ -427,7 +439,7 @@ async function load_html(options) {
   report(0.85, "Running scripts");
   try {
     if (site_settings.allow_js) {
-      evaluate_scripts();
+      await evaluate_scripts();
       await evaluate_modules();
     }
     report(0.93, "Finishing up");
