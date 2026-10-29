@@ -2,17 +2,48 @@ import * as loader from "../loader.mjs";
 
 export let internal = null;
 
+let fragment_hook = null;
+let trace_count = 0;
+const TRACE_LIMIT = 60;
+
+export function set_fragment_hook(hook) {
+  fragment_hook = hook;
+}
+
+export function trace_nav(kind, detail) {
+  if (trace_count >= TRACE_LIMIT) return;
+  trace_count++;
+  let stack = "";
+  try {
+    stack = String(new Error().stack || "")
+      .split("\n")
+      .slice(3, 7)
+      .map((line) => line.trim().slice(0, 150))
+      .join(" | ");
+  }
+  catch {}
+  try {
+    console.log(`[nav-trace ${trace_count}] ${kind} ${detail} <= ${stack}`);
+  }
+  catch {}
+}
+
 function without_hash(url) {
   let copy = new URL(url.href);
   copy.hash = "";
   return copy.href;
 }
 
-function navigate_fragment(target) {
+function navigate_fragment(target, replace = false) {
   let old_href = internal.href;
   if (old_href === target.href) return;
+  trace_nav(replace ? "fragment-replace" : "fragment", `${old_href} -> ${target.href}`);
   internal = target;
   loader.navigate(loader.frame_id, target.href, false);
+  try {
+    fragment_hook?.(target.href, replace);
+  }
+  catch {}
 
   if (target.hash.length > 1) {
     try {
@@ -23,6 +54,7 @@ function navigate_fragment(target) {
   }
 
   setTimeout(() => {
+    globalThis.dispatchEvent(new PopStateEvent("popstate", { state: null }));
     globalThis.dispatchEvent(new HashChangeEvent("hashchange", {
       oldURL: old_href,
       newURL: target.href
@@ -64,20 +96,22 @@ export class FakeLocation {
     }
   }
 
-  assign(url) {
+  assign(url, replace = false) {
     let target = new URL(url, internal);
     let has_fragment = String(url).includes("#") || target.hash !== "";
     if (has_fragment && without_hash(target) === without_hash(internal)) {
-      navigate_fragment(target);
+      navigate_fragment(target, replace);
       return;
     }
+    trace_nav(replace ? "replace" : "assign", `${internal.href} -> ${target.href}`);
     internal = target;
     loader.navigate(loader.frame_id, internal.href);
   }
   replace(url) {
-    this.assign(url);
+    this.assign(url, true);
   }
   reload() {
+    trace_nav("reload", internal.href);
     loader.navigate(loader.frame_id, internal.href);
   }
   toString() {
