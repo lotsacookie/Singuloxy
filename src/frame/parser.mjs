@@ -1,6 +1,7 @@
 import { ctx_vars, unreadable_vars } from "./context.mjs";
 
 import * as meriyah from "meriyah";
+import * as acorn from "acorn";
 import * as astray from 'astray';
 
 const AsyncFunction = Object.getPrototypeOf(async function() {}).constructor;
@@ -15,6 +16,22 @@ const module_parse_attempts = [
   {webcompat: true, next: true, module: true}
 ];
 
+const acorn_base = {
+  ecmaVersion: "latest",
+  allowReturnOutsideFunction: true,
+  allowAwaitOutsideFunction: true,
+  allowHashBang: true
+};
+
+const acorn_script_attempts = [
+  {...acorn_base, sourceType: "script"},
+  {...acorn_base, sourceType: "module"}
+];
+
+const acorn_module_attempts = [
+  {...acorn_base, sourceType: "module"}
+];
+
 const MAX_VALIDATE_LENGTH = 8 * 1024 * 1024;
 const MODULE_SYNTAX = /(^|[\n;{}])\s*(import\s*[\w{*"']|export\s+[\w{*])/;
 
@@ -25,6 +42,17 @@ function parse_js(js, is_module) {
   for (let options of attempts) {
     try {
       return meriyah.parse(js, {ranges: true, ...options});
+    }
+    catch (e) {
+      errors.push(e);
+    }
+  }
+
+  for (let options of is_module ? acorn_module_attempts : acorn_script_attempts) {
+    try {
+      let ast = acorn.parse(js, options);
+      console.warn("sandstone: meriyah could not parse this script but acorn could, using acorn:", errors.length ? String(errors[0]?.message ?? errors[0]).slice(0, 160) : "");
+      return ast;
     }
     catch (e) {
       errors.push(e);
@@ -48,6 +76,13 @@ function can_parse(js, is_module) {
     }
     catch {}
   }
+  for (let options of is_module ? acorn_module_attempts : acorn_script_attempts) {
+    try {
+      acorn.parse(js, options);
+      return true;
+    }
+    catch {}
+  }
   return false;
 }
 
@@ -64,6 +99,7 @@ function position_of(js, line, column) {
 }
 
 function locate_error(js, e) {
+  if (typeof e?.pos === "number") return e.pos;
   if (typeof e?.index === "number") return e.index;
   if (typeof e?.start === "number") return e.start;
   if (typeof e?.line === "number" && typeof e?.column === "number") {

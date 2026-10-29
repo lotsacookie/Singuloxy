@@ -16,6 +16,7 @@
     "dev:all": "concurrently 'npm run dev' 'cd example; npm run dev'"
   },
   "dependencies": {
+    "acorn": "^8.19.0",
     "astray": "^1.1.1",
     "libcurl.js": "^0.7.5",
     "meriyah": "^6.0.3"
