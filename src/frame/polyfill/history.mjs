@@ -1,6 +1,6 @@
 import * as loader from "../loader.mjs";
 import { ctx, document_base, convert_url } from "../context.mjs";
-import { internal, set_fragment_hook, trace_nav } from "./location.mjs";
+import { internal, set_fragment_hook, trace_nav, allow_url_change } from "./location.mjs";
 
 export class FakeHistory {
   #entries;
@@ -41,6 +41,7 @@ export class FakeHistory {
 
   pushState(state, unused, url) {
     let full_url = this.#resolve(url);
+    if (internal.href !== full_url && !allow_url_change(internal.href, full_url)) return;
     trace_nav("pushState", `${internal.href} -> ${full_url}`);
     this.#entries = this.#entries.slice(0, this.#index + 1);
     this.#entries.push({ state: state === undefined ? null : state, url: full_url });
@@ -50,6 +51,7 @@ export class FakeHistory {
 
   replaceState(state, unused, url) {
     let full_url = this.#resolve(url);
+    if (internal.href !== full_url && !allow_url_change(internal.href, full_url)) return;
     trace_nav("replaceState", `${internal.href} -> ${full_url}`);
     this.#entries[this.#index] = { state: state === undefined ? null : state, url: full_url };
     this.#sync_url(full_url);

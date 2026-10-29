@@ -28,6 +28,31 @@ export function trace_nav(kind, detail) {
   catch {}
 }
 
+const BOUNCE_WINDOW_MS = 600;
+let last_change = null;
+let bounce_blocked = 0;
+
+export function allow_url_change(from, to) {
+  let now = Date.now();
+  if (
+    last_change &&
+    now - last_change.time < BOUNCE_WINDOW_MS &&
+    last_change.from === to &&
+    last_change.to === from
+  ) {
+    bounce_blocked++;
+    if (bounce_blocked <= 3 || bounce_blocked % 50 === 0) {
+      try {
+        console.log(`[nav-guard] blocked fast bounce back to ${to} (staying on ${from}), total blocked: ${bounce_blocked}`);
+      }
+      catch {}
+    }
+    return false;
+  }
+  last_change = {from: from, to: to, time: now};
+  return true;
+}
+
 function without_hash(url) {
   let copy = new URL(url.href);
   copy.hash = "";
@@ -37,6 +62,7 @@ function without_hash(url) {
 function navigate_fragment(target, replace = false) {
   let old_href = internal.href;
   if (old_href === target.href) return;
+  if (!allow_url_change(old_href, target.href)) return;
   trace_nav(replace ? "fragment-replace" : "fragment", `${old_href} -> ${target.href}`);
   internal = target;
   loader.navigate(loader.frame_id, target.href, false);
