@@ -1,6 +1,7 @@
 import * as rpc from "../rpc.mjs";
 import * as util from "../util.mjs";
 import * as network from "./network.mjs";
+import * as page_cache from "./page_cache.mjs";
 
 import { version } from "./index.mjs";
 
@@ -10,6 +11,8 @@ import { libcurl } from "libcurl.js/bundled";
 import frame_js from "../../dist/sandstone_frame.js";
 
 const frame_urls = {};
+const cache_served = new Map();
+const CACHE_RELOAD_BYPASS_MS = 10 * 1000;
 
 function safe_css(value, fallback) {
   if (typeof value !== "string") return fallback;
@@ -269,14 +272,37 @@ export class ProxyFrame {
           ...navigation_headers(new URL(url), referrer, !!form_data),
           ...(options.headers || {})
         };
-        this.emit_progress(0.12, "Fetching page");
-        let response = await network.fetch_page(url, options, (attempt) => {
-          this.emit_progress(0.12, "Retrying (" + (attempt + 1) + ")");
-        });
-        html = await response.text();
-        this.emit_progress(0.35, "Page downloaded");
-        set_cookies = extract_set_cookies(response);
-        url = response.url;
+        let requested = url;
+        let cached = null;
+        let recent = cache_served.get(requested);
+        if (!form_data && !(recent && Date.now() - recent < CACHE_RELOAD_BYPASS_MS)) {
+          cached = await page_cache.get(requested);
+        }
+        if (cached) {
+          cache_served.set(requested, Date.now());
+          html = cached.html;
+          url = cached.url || requested;
+          this.emit_progress(0.35, "Loaded from cache");
+          network.fetch_page(requested, options).then(async (fresh) => {
+            let type = fresh.headers.get("content-type") || "";
+            if (!fresh.ok || !/html/i.test(type)) return;
+            let text = await fresh.text();
+            page_cache.put([requested, fresh.url], text, fresh.url);
+          }).catch(() => {});
+        }
+        else {
+          this.emit_progress(0.12, "Fetching page");
+          let response = await network.fetch_page(url, options, (attempt) => {
+            this.emit_progress(0.12, "Retrying (" + (attempt + 1) + ")");
+          });
+          html = await response.text();
+          this.emit_progress(0.35, "Page downloaded");
+          set_cookies = extract_set_cookies(response);
+          url = response.url;
+          if (!form_data && response.ok && /html/i.test(response.headers.get("content-type") || "")) {
+            page_cache.put([requested, response.url], html, response.url);
+          }
+        }
       }
       catch (e) {
         error = util.format_error(e);
