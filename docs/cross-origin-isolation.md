@@ -29,7 +29,7 @@ Check in the console: `crossOriginIsolated` must be `true` on the top page AND i
         {"key":"Cross-Origin-Embedder-Policy","value":"credentialless"}]}]}
 
 - nginx: `add_header Cross-Origin-Opener-Policy same-origin always; add_header Cross-Origin-Embedder-Policy credentialless always;`
-- GitHub Pages cannot set headers; put Cloudflare in front or move the host.
+- GitHub Pages cannot set headers; use the header service worker described below, put Cloudflare in front, or move the host.
 
 `credentialless` needs Chromium (Chrome/Edge). Cross-origin popups/OAuth logins on the top page lose `window.opener` under COOP.
 
@@ -43,3 +43,15 @@ Check in the console: `crossOriginIsolated` must be `true` on the top page AND i
 - On load the frame logs a console error when `crossOriginIsolated` is false or `SharedArrayBuffer` is missing.
 
 There is no single-threaded fallback. The Roblox web client needs shared WebAssembly memory for its pthread workers, and browsers only provide that on a cross-origin isolated top-level page, so the headers above are required.
+
+## Hosts that cannot set headers (GitHub Pages)
+
+`example/coi-sw.js` is a small service worker whose only job is to add `Cross-Origin-Opener-Policy: same-origin` and `Cross-Origin-Embedder-Policy: credentialless` to same-origin responses. Cross-origin requests are passed through untouched. `example/coi-register.js` registers it, then reloads the page once so the document itself is served with the headers.
+
+To use it on your own page:
+
+- Put `coi-sw.js` and `coi-register.js` in the same folder as the page, served from the same origin (a CDN copy will not work, the worker script must be same-origin).
+- Add `<script src="coi-register.js"></script>` in the `<head>`, before any script that loads sandstone.
+- The first visit reloads once. If the page is still not isolated after that, the console prints an error and it does not reload again.
+
+Limits: it needs HTTPS (GitHub Pages is), it does not run in Firefox private windows, the very first load is not isolated until the reload, and `COOP: same-origin` still breaks `window.opener` for popups. If the host already sends the headers, the register script exits immediately.
