@@ -25,7 +25,7 @@ const REQUEST_TIMEOUT_MS = 45 * 1000;
 const PAGE_TIMEOUT_MS = 15 * 1000;
 const PAGE_ATTEMPTS = 3;
 const PAGE_HEDGE_MS = 3500;
-const PAGE_COLD_TIMEOUT_MS = 40 * 1000;
+const PAGE_COLD_TIMEOUT_MS = 20 * 1000;
 let page_warm = false;
 const COALESCE_BYTES = 2 * 1024 * 1024;
 const COALESCE_WAIT_MS = 8;
@@ -1129,6 +1129,23 @@ function hedged_page(url, options) {
   });
 }
 
+function reset_wisp_connection() {
+  if (active_requests > 0) return;
+  try {
+    let connections = wisp_connections();
+    let connection = connections[ws_url];
+    if (!connection) return;
+    try {
+      connection.close?.();
+    }
+    catch {}
+    delete connections[ws_url];
+    page_warm = false;
+    quiet_warn("sandstone host: reset stalled wisp connection", ws_url);
+  }
+  catch {}
+}
+
 export async function fetch_page(url, options, on_status = null) {
   if (!session) await session_ready;
   let attempt = 0;
@@ -1149,6 +1166,7 @@ export async function fetch_page(url, options, on_status = null) {
       }
       catch {}
       cooldown_until = 0;
+      if (attempt >= 1) reset_wisp_connection();
       await sleep(400 * attempt);
     }
   }
