@@ -22,6 +22,8 @@ const MAX_TLS_RETRIES = 3;
 const MAX_PER_HOST = 6;
 const MAX_RESUMES = 5;
 const REQUEST_TIMEOUT_MS = 45 * 1000;
+const PAGE_TIMEOUT_MS = 15 * 1000;
+const PAGE_ATTEMPTS = 3;
 const COALESCE_BYTES = 2 * 1024 * 1024;
 const COALESCE_WAIT_MS = 8;
 const STREAM_IDLE_MS = 2 * 60 * 1000;
@@ -1010,7 +1012,7 @@ function diagnose_certificate(url) {
   })();
 }
 
-async function fetch_with_retry(url, options, ignore_block = false, use_session = null) {
+async function fetch_with_retry(url, options, ignore_block = false, use_session = null, timeout_ms = REQUEST_TIMEOUT_MS, retry_cap = Infinity) {
   let method = String(options?.method || "GET").toUpperCase();
   let can_retry = method === "GET" || method === "HEAD";
   let attempt = 0;
@@ -1027,7 +1029,7 @@ async function fetch_with_retry(url, options, ignore_block = false, use_session 
     try {
       let response = await with_timeout(
         (use_session || session).fetch(url, options ? {...options} : undefined),
-        REQUEST_TIMEOUT_MS,
+        timeout_ms,
         url
       );
       if (probe) {
@@ -1079,7 +1081,7 @@ async function fetch_with_retry(url, options, ignore_block = false, use_session 
       let retryable = can_retry ? is_transient(e) : PRE_REQUEST_ERRORS.test(message);
       let tls = TLS_ERROR.test(message);
       let refused = CONNECT_ERROR.test(message);
-      let limit = tls ? MAX_TLS_RETRIES : refused ? MAX_CONNECT_RETRIES : MAX_RETRIES;
+      let limit = Math.min(retry_cap, tls ? MAX_TLS_RETRIES : refused ? MAX_CONNECT_RETRIES : MAX_RETRIES);
       if (!retryable || attempt >= limit || WISP_GATE_ENABLED && wisp.tripped && refused) throw e;
       attempt++;
       let base = tls ? 800 : 400;
@@ -1092,19 +1094,25 @@ async function fetch_with_retry(url, options, ignore_block = false, use_session 
   }
 }
 
-export async function fetch_page(url, options) {
+export async function fetch_page(url, options, on_status = null) {
   if (!session) await session_ready;
   let attempt = 0;
 
   while (true) {
     try {
-      return await fetch_with_retry(url, options, true);
+      return await fetch_with_retry(url, options, true, null, PAGE_TIMEOUT_MS, 1);
     }
     catch (e) {
-      if (attempt >= 2 || !CONNECTION_ERRORS.test(error_message(e))) throw e;
+      let message = error_message(e);
+      if (attempt >= PAGE_ATTEMPTS - 1 || !/error code (7|28|35)\b/.test(message)) throw e;
       attempt++;
-      quiet_warn("sandstone host: page request failed, retrying:", url, error_message(e));
-      await sleep(2000 * attempt);
+      quiet_warn("sandstone host: page request failed, retrying:", url, message);
+      try {
+        on_status?.(attempt);
+      }
+      catch {}
+      cooldown_until = 0;
+      await sleep(400 * attempt);
     }
   }
 }

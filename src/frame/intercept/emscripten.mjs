@@ -124,10 +124,7 @@ function report_environment() {
     hardwareConcurrency: typeof navigator !== "undefined" ? navigator.hardwareConcurrency : undefined,
     webgpu: typeof navigator !== "undefined" && "gpu" in navigator
   };
-  if (!isolated || !has_shared) {
-    report("error", "shared memory is unavailable, pthread wasm such as the Roblox web client cannot run. Serve the top-level page with COOP same-origin and COEP credentialless (docs/cross-origin-isolation.md)", JSON.stringify(state));
-  }
-  else {
+  if (isolated && has_shared) {
     report("info", "emscripten environment", JSON.stringify(state));
   }
 }

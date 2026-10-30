@@ -125,6 +125,21 @@ function extract_set_cookies(response) {
   return cookies;
 }
 
+let libcurl_loading = null;
+
+function ensure_libcurl() {
+  if (libcurl.ready) return Promise.resolve();
+  if (!libcurl_loading) {
+    libcurl_loading = Promise.resolve(libcurl.load_wasm()).catch((e) => {
+      libcurl_loading = null;
+      throw e;
+    });
+  }
+  return libcurl_loading;
+}
+
+if (typeof window !== "undefined") ensure_libcurl().catch(() => {});
+
 export class ProxyFrame {
   constructor() {
     this.url = null;
@@ -202,11 +217,11 @@ export class ProxyFrame {
   }
 
   async wait_for_libcurl() {
-    if (libcurl.ready) return;
-    await libcurl.load_wasm();
+    await ensure_libcurl();
   }
 
   async navigate_to(url, form_data=null, referrer=null) {
+    this.emit_progress(0.02, "Starting");
     await this.wait_for_libcurl();
     if (!util.is_valid_url(url)) {
       throw TypeError("Invalid URL");
@@ -255,7 +270,9 @@ export class ProxyFrame {
           ...(options.headers || {})
         };
         this.emit_progress(0.12, "Fetching page");
-        let response = await network.fetch_page(url, options);
+        let response = await network.fetch_page(url, options, (attempt) => {
+          this.emit_progress(0.12, "Retrying (" + (attempt + 1) + ")");
+        });
         html = await response.text();
         this.emit_progress(0.35, "Page downloaded");
         set_cookies = extract_set_cookies(response);
