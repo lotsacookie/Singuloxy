@@ -25,6 +25,8 @@ const REQUEST_TIMEOUT_MS = 45 * 1000;
 const PAGE_TIMEOUT_MS = 15 * 1000;
 const PAGE_ATTEMPTS = 3;
 const PAGE_HEDGE_MS = 3500;
+const PAGE_COLD_TIMEOUT_MS = 40 * 1000;
+let page_warm = false;
 const COALESCE_BYTES = 2 * 1024 * 1024;
 const COALESCE_WAIT_MS = 8;
 const STREAM_IDLE_MS = 2 * 60 * 1000;
@@ -1068,6 +1070,7 @@ async function fetch_with_retry(url, options, ignore_block = false, use_session 
         log_throttled("http", host_of(url) + status_path, `sandstone host: http ${response.status} ${method} ${url}`);
       }
       note_success(url);
+      page_warm = true;
       return response;
     }
     catch (e) {
@@ -1096,6 +1099,7 @@ async function fetch_with_retry(url, options, ignore_block = false, use_session 
 }
 
 function hedged_page(url, options) {
+  if (!page_warm) return fetch_with_retry(url, options, true, null, PAGE_COLD_TIMEOUT_MS, 1);
   return new Promise((resolve, reject) => {
     let pending = 0;
     let done = false;
@@ -1133,7 +1137,7 @@ export async function fetch_page(url, options, on_status = null) {
     try {
       let method = String(options?.method || "GET").toUpperCase();
       if (method === "GET") return await hedged_page(url, options);
-      return await fetch_with_retry(url, options, true, null, PAGE_TIMEOUT_MS, 1);
+      return await fetch_with_retry(url, options, true, null, page_warm ? PAGE_TIMEOUT_MS : PAGE_COLD_TIMEOUT_MS, 1);
     }
     catch (e) {
       let message = error_message(e);
@@ -1141,7 +1145,7 @@ export async function fetch_page(url, options, on_status = null) {
       attempt++;
       quiet_warn("sandstone host: page request failed, retrying:", url, message);
       try {
-        on_status?.(attempt);
+        on_status?.(attempt, message);
       }
       catch {}
       cooldown_until = 0;

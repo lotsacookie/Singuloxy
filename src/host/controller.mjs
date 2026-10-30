@@ -292,8 +292,9 @@ export class ProxyFrame {
         }
         else {
           this.emit_progress(0.12, "Fetching page");
-          let response = await network.fetch_page(url, options, (attempt) => {
-            this.emit_progress(0.12, "Retrying (" + (attempt + 1) + ")");
+          let response = await network.fetch_page(url, options, (attempt, reason) => {
+            let code = /error code (\d+)/.exec(reason || "");
+            this.emit_progress(0.12, "Retrying (" + (attempt + 1) + ")" + (code ? " error " + code[1] : ""));
           });
           html = await response.text();
           this.emit_progress(0.35, "Page downloaded");
