@@ -32,3 +32,14 @@ Check in the console: `crossOriginIsolated` must be `true` on the top page AND i
 - GitHub Pages cannot set headers; put Cloudflare in front or move the host.
 
 `credentialless` needs Chromium (Chrome/Edge). Cross-origin popups/OAuth logins on the top page lose `window.opener` under COOP.
+
+## Emscripten and WebGL handling
+
+`src/frame/intercept/emscripten.mjs` hooks canvas creation for pages that load Emscripten builds such as the Roblox web client.
+
+- `getContext` on `HTMLCanvasElement` and `OffscreenCanvas` for `webgl`, `webgl2` and `experimental-webgl` always sends `failIfMajorPerformanceCaveat: false`, retries once with conservative attributes, and logs one console error if the browser still returns `null`.
+- `webglcontextlost` is default-prevented so the engine can receive `webglcontextrestored` instead of dying silently.
+- `navigator.gpu.requestAdapter()` resolves `null` instead of rejecting so engines can fall back to WebGL.
+- On load the frame logs a console error when `crossOriginIsolated` is false or `SharedArrayBuffer` is missing.
+
+There is no single-threaded fallback. The Roblox web client needs shared WebAssembly memory for its pthread workers, and browsers only provide that on a cross-origin isolated top-level page, so the headers above are required.
