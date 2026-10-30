@@ -32,8 +32,22 @@ const BOUNCE_WINDOW_MS = 600;
 let last_change = null;
 let bounce_blocked = 0;
 
+function is_root_path(href) {
+  try {
+    return new URL(href).pathname === "/";
+  }
+  catch {
+    return false;
+  }
+}
+
 export function allow_url_change(from, to) {
   let now = Date.now();
+  let root = is_root_path(from) || is_root_path(to);
+  if (!root) {
+    last_change = null;
+    return true;
+  }
   if (
     last_change &&
     now - last_change.time < BOUNCE_WINDOW_MS &&

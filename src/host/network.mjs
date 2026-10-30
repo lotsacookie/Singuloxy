@@ -24,6 +24,7 @@ const MAX_RESUMES = 5;
 const REQUEST_TIMEOUT_MS = 45 * 1000;
 const PAGE_TIMEOUT_MS = 15 * 1000;
 const PAGE_ATTEMPTS = 3;
+const PAGE_HEDGE_MS = 3500;
 const COALESCE_BYTES = 2 * 1024 * 1024;
 const COALESCE_WAIT_MS = 8;
 const STREAM_IDLE_MS = 2 * 60 * 1000;
@@ -1094,12 +1095,44 @@ async function fetch_with_retry(url, options, ignore_block = false, use_session 
   }
 }
 
+function hedged_page(url, options) {
+  return new Promise((resolve, reject) => {
+    let pending = 0;
+    let done = false;
+    let timer = null;
+    let launch = () => {
+      pending++;
+      fetch_with_retry(url, options, true, null, PAGE_TIMEOUT_MS, 1).then((response) => {
+        if (done) {
+          discard_response(response);
+          return;
+        }
+        done = true;
+        clearTimeout(timer);
+        resolve(response);
+      }, (error) => {
+        pending--;
+        if (done || pending > 0) return;
+        done = true;
+        clearTimeout(timer);
+        reject(error);
+      });
+    };
+    launch();
+    timer = setTimeout(() => {
+      if (!done) launch();
+    }, PAGE_HEDGE_MS);
+  });
+}
+
 export async function fetch_page(url, options, on_status = null) {
   if (!session) await session_ready;
   let attempt = 0;
 
   while (true) {
     try {
+      let method = String(options?.method || "GET").toUpperCase();
+      if (method === "GET") return await hedged_page(url, options);
       return await fetch_with_retry(url, options, true, null, PAGE_TIMEOUT_MS, 1);
     }
     catch (e) {
