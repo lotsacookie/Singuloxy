@@ -1015,7 +1015,60 @@ function diagnose_certificate(url) {
   })();
 }
 
-async function fetch_with_retry(url, options, ignore_block = false, use_session = null, timeout_ms = REQUEST_TIMEOUT_MS, retry_cap = Infinity) {
+// Roblox's quick sign-in ticket is single-use. The page sometimes fires /v2/login twice within a few ms
+// (both pollers see status=Validated), and whichever lands second gets "Incorrect username or password".
+// Identical concurrent logins (same url, CSRF token and body) are collapsed into one real request.
+const login_inflight = new Map();
+const LOGIN_COALESCE_LINGER_MS = 1500;
+
+function login_coalesce_key(url, options) {
+  if (String(options?.method || "GET").toUpperCase() !== "POST") return null;
+  if (!/^auth\.roblox\.com$/i.test(host_of(url)) || !/\/v2\/login(\?|$)/i.test(url)) return null;
+  if (typeof options?.body !== "string") return null;
+  let token = Object.entries(options.headers || {}).find(([name]) => name.toLowerCase() === "x-csrf-token");
+  return url + "\n" + (token ? token[1] : "") + "\n" + options.body;
+}
+
+function clone_response(response) {
+  let copy = response.clone();
+  for (let key of ["raw_headers", "url", "redirected"]) {
+    try {
+      Object.defineProperty(copy, key, {value: response[key]});
+    }
+    catch {}
+  }
+  return copy;
+}
+
+function fetch_with_retry(url, options, ...rest) {
+  let key = login_coalesce_key(url, options);
+  if (!key) return fetch_with_retry_inner(url, options, ...rest);
+  let entry = login_inflight.get(key);
+  if (entry) {
+    quiet_warn(`sandstone host: coalesced duplicate login request ${url}`);
+    return entry.promise.then(() => entry.spare ? clone_response(entry.spare) : fetch_with_retry_inner(url, options, ...rest));
+  }
+  entry = {promise: null, spare: null};
+  entry.promise = fetch_with_retry_inner(url, options, ...rest).then((response) => {
+    try {
+      entry.spare = clone_response(response);
+    }
+    catch {}
+    return response;
+  });
+  login_inflight.set(key, entry);
+  let release = () => setTimeout(() => {
+    login_inflight.delete(key);
+    try {
+      entry.spare?.body?.cancel?.().catch?.(() => {});
+    }
+    catch {}
+  }, LOGIN_COALESCE_LINGER_MS);
+  entry.promise.then(release, () => login_inflight.delete(key));
+  return entry.promise;
+}
+
+async function fetch_with_retry_inner(url, options, ignore_block = false, use_session = null, timeout_ms = REQUEST_TIMEOUT_MS, retry_cap = Infinity) {
   let method = String(options?.method || "GET").toUpperCase();
   let can_retry = method === "GET" || method === "HEAD";
   let attempt = 0;
