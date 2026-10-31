@@ -46,11 +46,73 @@ function is_page_origin(url_obj) {
   return url_obj.origin === origin;
 }
 
+function header_value(value) {
+  if (value === undefined || value === null) return null;
+  let type = typeof value;
+  if (type === "function" || type === "symbol") return null;
+  try {
+    return String(value);
+  }
+  catch {
+    return null;
+  }
+}
+
+function clean_headers(entries) {
+  let result = {};
+  for (let [key, value] of entries) {
+    let text = header_value(value);
+    if (text === null) continue;
+    result[String(key)] = text;
+  }
+  return result;
+}
+
 function normalize_headers(headers) {
   if (!headers) return {};
   if (headers instanceof NativeHeaders) return Object.fromEntries(headers);
-  if (Array.isArray(headers)) return Object.fromEntries(headers);
-  return {...headers};
+  if (Array.isArray(headers)) return clean_headers(headers);
+  if (typeof headers.entries === "function" && typeof headers.get === "function") {
+    try {
+      return clean_headers(Array.from(headers.entries()));
+    }
+    catch {
+      return {};
+    }
+  }
+  return clean_headers(Object.entries(headers));
+}
+
+function is_cloneable(value) {
+  let type = typeof value;
+  if (type === "function" || type === "symbol") return false;
+  if (value === undefined || value === null) return true;
+  if (type !== "object") return true;
+  try {
+    structuredClone(value);
+    return true;
+  }
+  catch {
+    return false;
+  }
+}
+
+function sanitize_options(options) {
+  let result = {};
+  if (!options || typeof options !== "object") return result;
+  for (let key of Object.keys(options)) {
+    if (key === "headers") continue;
+    let value;
+    try {
+      value = options[key];
+    }
+    catch {
+      continue;
+    }
+    if (!is_cloneable(value)) continue;
+    result[key] = value;
+  }
+  return result;
 }
 
 function has_header(headers, name) {
@@ -97,7 +159,7 @@ function with_browser_headers(url_obj, options) {
     headers["User-Agent"] = navigator.userAgent;
   }
 
-  return {...(options || {}), headers: headers, from_page: from_page_code};
+  return {...sanitize_options(options), headers: headers, from_page: from_page_code};
 }
 
 function cookie_domain(set_cookie) {
