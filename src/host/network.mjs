@@ -1021,6 +1021,7 @@ async function fetch_with_retry(url, options, ignore_block = false, use_session 
   let attempt = 0;
   let roblox_cdn = is_roblox_cdn(url);
   let forbidden_retries = 0;
+  let identity_forced = false;
   if (roblox_cdn) options = with_roblox_referer(options);
 
   while (true) {
@@ -1061,7 +1062,7 @@ async function fetch_with_retry(url, options, ignore_block = false, use_session 
             : keep_headers(options, ["user-agent", "range"]);
         continue;
       }
-      if (/^auth\.roblox\.com$/i.test(host_of(url)) || /auth-token-service|\/challenge\//i.test(url)) {
+      if (/^auth\.roblox\.com$/i.test(host_of(url)) || /auth-token-service|proof-of-work-service|\/v2\/captcha|\/challenge\//i.test(url)) {
         let hv = (name) => response.headers.get(name);
         let sent_csrf = Object.keys(options?.headers || {}).some((key) => key.toLowerCase() === "x-csrf-token");
         let detail = "";
@@ -1094,6 +1095,11 @@ async function fetch_with_retry(url, options, ignore_block = false, use_session 
       let message = error_message(e);
       if (CERT_ERROR.test(message)) diagnose_certificate(url);
       if (!ignore_block && is_host_blocked(url) && CONNECTION_ERRORS.test(message)) throw e;
+      if (can_retry && !identity_forced && /error code 18\b|partial file/i.test(message)) {
+        identity_forced = true;
+        options = with_header(options, "Accept-Encoding", "identity");
+        quiet_warn(`sandstone host: partial transfer, retrying with identity encoding ${url}`);
+      }
       let retryable = can_retry ? is_transient(e) : PRE_REQUEST_ERRORS.test(message);
       let tls = TLS_ERROR.test(message);
       let refused = CONNECT_ERROR.test(message);
