@@ -1095,12 +1095,15 @@ async function fetch_with_retry(url, options, ignore_block = false, use_session 
       let message = error_message(e);
       if (CERT_ERROR.test(message)) diagnose_certificate(url);
       if (!ignore_block && is_host_blocked(url) && CONNECTION_ERRORS.test(message)) throw e;
+      let identity_now = false;
       if (can_retry && !identity_forced && /error code 18\b|partial file/i.test(message)) {
         identity_forced = true;
+        identity_now = true;
         options = with_header(options, "Accept-Encoding", "identity");
         quiet_warn(`sandstone host: partial transfer, retrying with identity encoding ${url}`);
       }
       let retryable = can_retry ? is_transient(e) : PRE_REQUEST_ERRORS.test(message);
+      if (identity_now) retryable = true;
       let tls = TLS_ERROR.test(message);
       let refused = CONNECT_ERROR.test(message);
       let limit = Math.min(retry_cap, tls ? MAX_TLS_RETRIES : refused ? MAX_CONNECT_RETRIES : MAX_RETRIES);
