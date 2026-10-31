@@ -1072,7 +1072,24 @@ async function fetch_with_retry(url, options, ignore_block = false, use_session 
           }
           catch {}
         }
-        quiet_warn(`sandstone host: auth ${response.status} ${method} ${url} sent-csrf=${sent_csrf ? "yes" : "no"} got-csrf=${hv("x-csrf-token") ? "yes" : "no"} challenge=${hv("rblx-challenge-type") || hv("rblx-challenge-id") || "no"} set-cookie=${hv("set-cookie") ? "yes" : "no"} type=${hv("content-type") || ""} body=${detail}`);
+        let shape = "";
+        if (/\/v2\/login/i.test(url) && typeof options?.body === "string") {
+          try {
+            let parsed = JSON.parse(options.body);
+            shape = ` ctype=${parsed.ctype} keys=${Object.keys(parsed).join(",")}`;
+          }
+          catch {
+            shape = " body=non-json";
+          }
+        }
+        if (response.status === 200 && /login\/status/i.test(url)) {
+          try {
+            let found = /"status"\s*:\s*"([A-Za-z]+)"/.exec(await response.clone().text());
+            if (found) detail = "status=" + found[1];
+          }
+          catch {}
+        }
+        quiet_warn(`sandstone host: auth ${response.status} ${method} ${url} sent-csrf=${sent_csrf ? "yes" : "no"} got-csrf=${hv("x-csrf-token") ? "yes" : "no"} challenge=${hv("rblx-challenge-type") || hv("rblx-challenge-id") || "no"} set-cookie=${hv("set-cookie") ? "yes" : "no"} type=${hv("content-type") || ""} body=${detail}${shape}`);
       }
       if (response.status >= 400 && /(^|\.)(roblox\.com|rbxcdn\.com)$/i.test(host_of(url))) {
         let status_path = "";
@@ -1100,6 +1117,7 @@ async function fetch_with_retry(url, options, ignore_block = false, use_session 
         identity_forced = true;
         identity_now = true;
         options = with_header(options, "Accept-Encoding", "identity");
+        options = {...options, _libcurl_verbose: 1, _libcurl_http_version: 1.1};
         quiet_warn(`sandstone host: partial transfer, retrying with identity encoding ${url}`);
       }
       let retryable = can_retry ? is_transient(e) : PRE_REQUEST_ERRORS.test(message);
