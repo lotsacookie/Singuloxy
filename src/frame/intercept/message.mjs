@@ -63,6 +63,10 @@ function trace(text) {
   catch {}
 }
 
+function is_internal(data) {
+  return data !== null && typeof data === "object" && typeof data.type === "string" && typeof data.id === "string";
+}
+
 function describe_data(data) {
   if (data === null || data === undefined) return String(data);
   if (typeof data === "string") return "string(" + data.length + ")";
@@ -85,6 +89,7 @@ function install_trace() {
         from = event.origin;
       }
       catch {}
+      if (is_internal(event.data)) return;
       trace("message received origin=" + from + " data=" + describe_data(event.data));
     }, true);
   }
@@ -98,8 +103,7 @@ function install_post_message() {
       let receiver = unwrap_this(this_arg);
       let same = is_same_origin_window(receiver);
       let next = same ? normalize_arguments(args) : args;
-      if (next !== args) trace("postMessage retarget " + String(args[1] && args[1].targetOrigin || args[1]) + " -> * data=" + describe_data(args[0]));
-      else if (!same) trace("postMessage to cross-origin window data=" + describe_data(args[0]));
+      if (!is_internal(args[0])) trace("postMessage target=" + String(args[1] && args[1].targetOrigin || args[1]) + (same ? "" : " cross-origin") + " data=" + describe_data(args[0]));
       return Reflect.apply(func, receiver, next);
     });
   }

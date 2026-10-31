@@ -442,6 +442,7 @@ async function load_html(options) {
     if (site_settings.allow_js) {
       await evaluate_scripts();
       await evaluate_modules();
+      if (is_iframe) console.log("iframe scripts evaluated");
     }
     report(0.93, "Finishing up");
 

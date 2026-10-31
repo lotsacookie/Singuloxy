@@ -68,6 +68,10 @@ export function rewrite_iframe(iframe_element) {
       });
     }
 
+    try {
+      console.log("iframe load dispatched", new URL(final_url).origin);
+    }
+    catch {}
     iframe_element.dispatchEvent(new Event("load"));
   };
 
