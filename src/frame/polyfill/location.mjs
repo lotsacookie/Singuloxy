@@ -28,13 +28,17 @@ export function trace_nav(kind, detail) {
   catch {}
 }
 
-const BOUNCE_WINDOW_MS = 600;
-let last_change = null;
+const BOUNCE_WINDOW_MS = 2000;
+const BOUNCE_PIN_MS = 5000;
+const ROOT_HASHES = new Set(["", "#", "#!", "#!/", "#/"]);
+let arrived_at = 0;
+let pinned_until = 0;
 let bounce_blocked = 0;
 
-function is_root_path(href) {
+function is_root_url(href) {
   try {
-    return new URL(href).pathname === "/";
+    let url = new URL(href);
+    return url.pathname === "/" || ROOT_HASHES.has(url.hash);
   }
   catch {
     return false;
@@ -43,27 +47,24 @@ function is_root_path(href) {
 
 export function allow_url_change(from, to) {
   let now = Date.now();
-  let root = is_root_path(from) || is_root_path(to);
-  if (!root) {
-    last_change = null;
+  let from_root = is_root_url(from);
+  let to_root = is_root_url(to);
+  if (!to_root) {
+    if (from_root) arrived_at = now;
     return true;
   }
-  if (
-    last_change &&
-    now - last_change.time < BOUNCE_WINDOW_MS &&
-    last_change.from === to &&
-    last_change.to === from
-  ) {
+  if (from_root) return true;
+  if (now < pinned_until || now - arrived_at < BOUNCE_WINDOW_MS) {
+    pinned_until = now + BOUNCE_PIN_MS;
     bounce_blocked++;
     if (bounce_blocked <= 3 || bounce_blocked % 50 === 0) {
       try {
-        console.log(`[nav-guard] blocked fast bounce back to ${to} (staying on ${from}), total blocked: ${bounce_blocked}`);
+        console.log(`[nav-guard] blocked bounce back to ${to} (staying on ${from}), total blocked: ${bounce_blocked}`);
       }
       catch {}
     }
     return false;
   }
-  last_change = {from: from, to: to, time: now};
   return true;
 }
 
