@@ -250,12 +250,24 @@ export class FakeXMLHttpRequest extends EventTarget {
     (async () => {
       try {
         await this.#encode_body(options, body);
-        this.#response = await network.fetch(this.#req_url, options);
-        if (this.#aborted) return;
-        this.readyState = this.HEADERS_RECEIVED;
-        this.readyState = this.LOADING;
-  
-        await this.#read_body();
+        // curl error 18 (partial file) is a transient transfer cut; retry idempotent requests a couple of times.
+        let can_retry = options.method === "GET" || options.method === "HEAD";
+        for (let attempt = 0; ; attempt++) {
+          try {
+            this.#response = await network.fetch(this.#req_url, options);
+            if (this.#aborted) return;
+            this.readyState = this.HEADERS_RECEIVED;
+            this.readyState = this.LOADING;
+            await this.#read_body();
+            break;
+          }
+          catch (e) {
+            let transient = /error code 18\b|partial file/i.test(String(e?.message ?? e));
+            if (this.#aborted || !can_retry || !transient || attempt >= 2) throw e;
+            console.warn("sandstone: retrying xhr after partial transfer", this.#req_url?.href, attempt + 1);
+            await new Promise((r) => setTimeout(r, 300 * (attempt + 1)));
+          }
+        }
         if (this.#aborted) return;
         let size = this.#response_data.byteLength;
         this.#emit_event(new ProgressEvent("progress", {lengthComputable: true, loaded: size, total: size}));
