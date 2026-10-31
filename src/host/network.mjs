@@ -1021,12 +1021,23 @@ function diagnose_certificate(url) {
 const login_inflight = new Map();
 const LOGIN_COALESCE_LINGER_MS = 1500;
 
+function body_as_text(body) {
+  try {
+    if (typeof body === "string") return body;
+    if (body instanceof ArrayBuffer) return new TextDecoder().decode(body);
+    if (ArrayBuffer.isView(body)) return new TextDecoder().decode(body);
+  }
+  catch {}
+  return null;
+}
+
 function login_coalesce_key(url, options) {
   if (String(options?.method || "GET").toUpperCase() !== "POST") return null;
   if (!/^auth\.roblox\.com$/i.test(host_of(url)) || !/\/v2\/login(\?|$)/i.test(url)) return null;
-  if (typeof options?.body !== "string") return null;
+  let text = body_as_text(options?.body);
+  if (text === null) return null;
   let token = Object.entries(options.headers || {}).find(([name]) => name.toLowerCase() === "x-csrf-token");
-  return url + "\n" + (token ? token[1] : "") + "\n" + options.body;
+  return url + "\n" + (token ? token[1] : "") + "\n" + text;
 }
 
 function clone_response(response) {
@@ -1126,13 +1137,22 @@ async function fetch_with_retry_inner(url, options, ignore_block = false, use_se
           catch {}
         }
         let shape = "";
-        if (/\/v2\/login/i.test(url) && typeof options?.body === "string") {
-          try {
-            let parsed = JSON.parse(options.body);
-            shape = ` ctype=${parsed.ctype} keys=${Object.keys(parsed).join(",")}`;
+        if (/\/v2\/login/i.test(url)) {
+          let text = body_as_text(options?.body);
+          if (text === null) {
+            shape = ` body-type=${Object.prototype.toString.call(options?.body)}`;
           }
-          catch {
-            shape = " body=non-json";
+          else {
+            try {
+              let parsed = JSON.parse(text);
+              let lens = Object.entries(parsed)
+                .map(([key, value]) => `${key}:${typeof value === "string" ? value.length : typeof value}`)
+                .join(",");
+              shape = ` ctype=${parsed.ctype} fields=[${lens}] body-bytes=${text.length}`;
+            }
+            catch {
+              shape = ` body=non-json bytes=${text.length}`;
+            }
           }
         }
         if (response.status === 200 && /login\/status/i.test(url)) {
