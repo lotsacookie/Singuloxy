@@ -1062,7 +1062,7 @@ async function fetch_with_retry(url, options, ignore_block = false, use_session 
             : keep_headers(options, ["user-agent", "range"]);
         continue;
       }
-      if (/^auth\.roblox\.com$/i.test(host_of(url)) || /auth-token-service|proof-of-work-service|\/v2\/captcha|\/challenge\//i.test(url)) {
+      if (/^auth\.roblox\.com$/i.test(host_of(url)) || /auth-token-service|proof-of-work-service|rotating-client-service|\/v1\/users\/authenticated|\/v2\/captcha|\/challenge\//i.test(url)) {
         let hv = (name) => response.headers.get(name);
         let sent_csrf = Object.keys(options?.headers || {}).some((key) => key.toLowerCase() === "x-csrf-token");
         let detail = "";
@@ -1088,6 +1088,19 @@ async function fetch_with_retry(url, options, ignore_block = false, use_session 
             if (found) detail = "status=" + found[1];
           }
           catch {}
+        }
+        let cookie_names = "";
+        try {
+          cookie_names = (response.raw_headers || [])
+            .filter((pair) => Array.isArray(pair) && String(pair[0]).toLowerCase() === "set-cookie")
+            .map((pair) => String(pair[1]).split("=")[0].trim() + (/;\s*domain=/i.test(String(pair[1])) ? "@" + /;\s*domain=([^;]+)/i.exec(String(pair[1]))[1] : ""))
+            .join(",");
+        }
+        catch {}
+        let sent_cookie = has_header(options?.headers, "cookie") ? "yes" : "no";
+        shape += ` set-cookie-names=[${cookie_names}] sent-cookie-hdr=${sent_cookie}`;
+        if (response.status >= 400 && /rotating-client-service/i.test(url)) {
+          shape += ` www-auth=${hv("www-authenticate") || ""}`;
         }
         quiet_warn(`sandstone host: auth ${response.status} ${method} ${url} sent-csrf=${sent_csrf ? "yes" : "no"} got-csrf=${hv("x-csrf-token") ? "yes" : "no"} challenge=${hv("rblx-challenge-type") || hv("rblx-challenge-id") || "no"} set-cookie=${hv("set-cookie") ? "yes" : "no"} type=${hv("content-type") || ""} body=${detail}${shape}`);
       }
