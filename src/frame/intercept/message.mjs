@@ -1,4 +1,6 @@
-import { ctx, is_worker, proxy_function, unwrap_this } from "../context.mjs";
+import { ctx, proxy_function, unwrap_this } from "../context.mjs";
+
+const IN_WORKER = typeof importScripts === "function";
 
 const ORIGIN_KEY = "__sandstone_origin__";
 const HTTP_ORIGIN = /^https?:\/\//i;
@@ -92,7 +94,7 @@ function install_event_origin() {
   catch {}
 }
 
-if (!is_worker && typeof window !== "undefined") {
+if (!IN_WORKER && typeof window !== "undefined") {
   install_origin_marker();
   install_post_message();
   install_event_origin();
