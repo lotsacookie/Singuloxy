@@ -1061,6 +1061,18 @@ async function fetch_with_retry(url, options, ignore_block = false, use_session 
             : keep_headers(options, ["user-agent", "range"]);
         continue;
       }
+      if (/^auth\.roblox\.com$/i.test(host_of(url)) || /auth-token-service|\/challenge\//i.test(url)) {
+        let hv = (name) => response.headers.get(name);
+        let sent_csrf = Object.keys(options?.headers || {}).some((key) => key.toLowerCase() === "x-csrf-token");
+        let detail = "";
+        if (response.status >= 400) {
+          try {
+            detail = (await response.clone().text()).slice(0, 160);
+          }
+          catch {}
+        }
+        quiet_warn(`sandstone host: auth ${response.status} ${method} ${url} sent-csrf=${sent_csrf ? "yes" : "no"} got-csrf=${hv("x-csrf-token") ? "yes" : "no"} challenge=${hv("rblx-challenge-type") || hv("rblx-challenge-id") || "no"} set-cookie=${hv("set-cookie") ? "yes" : "no"} type=${hv("content-type") || ""} body=${detail}`);
+      }
       if (response.status >= 400 && /(^|\.)(roblox\.com|rbxcdn\.com)$/i.test(host_of(url))) {
         let status_path = "";
         try {
