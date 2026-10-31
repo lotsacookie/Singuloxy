@@ -81,7 +81,16 @@ export function rewrite_iframe(iframe_element) {
     try {
       let response = await network.fetch(iframe_url);
       html = await response.text();
-      final_url = response.url;
+      final_url = response.url || iframe_url;
+      try {
+        let wanted = new URL(iframe_url).hash;
+        let final = new URL(final_url);
+        if (wanted && !final.hash) {
+          final.hash = wanted;
+          final_url = final.href;
+        }
+      }
+      catch {}
     }
     catch (e) {
       error = util.format_error(e);
