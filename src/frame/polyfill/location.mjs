@@ -28,10 +28,11 @@ export function trace_nav(kind, detail) {
   catch {}
 }
 
-const BOUNCE_WINDOW_MS = 2000;
+const LOOP_WINDOW_MS = 4000;
+const LOOP_MAX_ROOT_ARRIVALS = 2;
 const BOUNCE_PIN_MS = 5000;
 const ROOT_HASHES = new Set(["", "#", "#!", "#!/", "#/"]);
-let arrived_at = 0;
+let root_arrivals = [];
 let pinned_until = 0;
 let bounce_blocked = 0;
 
@@ -46,25 +47,21 @@ function is_root_url(href) {
 }
 
 export function allow_url_change(from, to) {
+  if (!is_root_url(to) || is_root_url(from)) return true;
   let now = Date.now();
-  let from_root = is_root_url(from);
-  let to_root = is_root_url(to);
-  if (!to_root) {
-    if (from_root) arrived_at = now;
-    return true;
-  }
-  if (from_root) return true;
-  if (now < pinned_until || now - arrived_at < BOUNCE_WINDOW_MS) {
+  root_arrivals = root_arrivals.filter((time) => now - time < LOOP_WINDOW_MS);
+  if (now < pinned_until || root_arrivals.length >= LOOP_MAX_ROOT_ARRIVALS) {
     pinned_until = now + BOUNCE_PIN_MS;
     bounce_blocked++;
     if (bounce_blocked <= 3 || bounce_blocked % 50 === 0) {
       try {
-        console.log(`[nav-guard] blocked bounce back to ${to} (staying on ${from}), total blocked: ${bounce_blocked}`);
+        console.log(`[nav-guard] blocked repeated return to ${to} (staying on ${from}), total blocked: ${bounce_blocked}`);
       }
       catch {}
     }
     return false;
   }
+  root_arrivals.push(now);
   return true;
 }
 
