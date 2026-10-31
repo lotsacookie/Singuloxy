@@ -5,7 +5,7 @@ import * as network from "./network.mjs";
 import * as parser from "./parser.mjs";
 
 import { update_ctx, run_script, run_script_safe, ctx, convert_url, document_base, set_loading_document, get_cookie_jar } from "./context.mjs";
-import { pending_scripts, script_state, execute_script } from "./rewrite/script.mjs";
+import { pending_scripts, script_state, execute_script, wait_for_prewarms } from "./rewrite/script.mjs";
 import { pending_modules } from "./rewrite/module.mjs";
 import { install_form_handler, patch_form_submit } from "./rewrite/form.mjs";
 import { set_ready_state } from "./intercept/document.mjs";
@@ -404,6 +404,7 @@ async function load_html(options) {
   }, 500);
   try {
     await rewrite.element(html.documentElement);
+    await wait_for_prewarms();
   }
   finally {
     clearInterval(creep_timer);

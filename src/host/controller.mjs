@@ -2,6 +2,7 @@ import * as rpc from "../rpc.mjs";
 import * as util from "../util.mjs";
 import * as network from "./network.mjs";
 import * as page_cache from "./page_cache.mjs";
+import * as rewrite_cache from "./rewrite_cache.mjs";
 
 import { version } from "./index.mjs";
 
@@ -13,6 +14,9 @@ import frame_js from "../../dist/sandstone_frame.js";
 const frame_urls = {};
 const cache_served = new Map();
 const CACHE_RELOAD_BYPASS_MS = 10 * 1000;
+const FRAME_LOAD_TIMEOUT_MS = 8000;
+const FRAME_PING_TIMEOUT_MS = 5000;
+const FRAME_START_ATTEMPTS = 3;
 
 function safe_css(value, fallback) {
   if (typeof value !== "string") return fallback;
@@ -223,6 +227,32 @@ export class ProxyFrame {
     await ensure_libcurl();
   }
 
+  load_frame_document() {
+    return new Promise((resolve) => {
+      let done = false;
+      let finish = () => {
+        if (done) return;
+        done = true;
+        this.iframe.removeEventListener("load", finish);
+        resolve();
+      };
+      this.iframe.addEventListener("load", finish);
+      this.iframe.src = get_frame_bundle(this.theme);
+      setTimeout(finish, FRAME_LOAD_TIMEOUT_MS);
+    });
+  }
+
+  async connect_frame() {
+    for (let attempt = 0; attempt < FRAME_START_ATTEMPTS; attempt++) {
+      if (attempt > 0) {
+        this.emit_progress(0.4, "Restarting page frame (" + (attempt + 1) + ")");
+        await this.load_frame_document();
+      }
+      if (await rpc.wait_on_frame(this.iframe, FRAME_PING_TIMEOUT_MS)) return true;
+    }
+    return false;
+  }
+
   async navigate_to(url, form_data=null, referrer=null) {
     this.emit_progress(0.02, "Starting");
     await this.wait_for_libcurl();
@@ -240,7 +270,7 @@ export class ProxyFrame {
     let old_ports = [this.rpc_target.target, ...this.rpc_target.extra_targets].filter(Boolean);
     network.end_streams_for(old_ports);
 
-    this.iframe.src = get_frame_bundle(this.theme);
+    let frame_loaded = this.load_frame_document();
     network.clean_ws_connections(this.id);
 
     let html = null;
@@ -325,7 +355,16 @@ export class ProxyFrame {
       }
       catch {}
     }, 25000);
-    await rpc.wait_on_frame(this.iframe);
+    await frame_loaded;
+    if (!(await this.connect_frame())) {
+      clearTimeout(ready_timer);
+      this.emit_progress(1, "Could not start page frame");
+      try {
+        this.on_ready();
+      }
+      catch {}
+      return;
+    }
     let msg_channel = new MessageChannel();
     this.rpc_target.set_target(msg_channel.port1);
     msg_channel.port1.start();
@@ -404,6 +443,14 @@ rpc.rpc_handlers["console"] = async (frame_id, batch) => {
     frame.on_console(clean);
   }
   catch {}
+}
+
+rpc.rpc_handlers["rewrite_cache_get"] = async (keys) => {
+  return await rewrite_cache.get_many(keys);
+}
+
+rpc.rpc_handlers["rewrite_cache_put"] = async (items) => {
+  await rewrite_cache.put_many(items);
 }
 
 rpc.rpc_handlers["progress"] = async (frame_id, value, text) => {

@@ -298,18 +298,52 @@ function cached_rewrite(js, is_module, label) {
     return hit;
   }
   let result = rewrite_js_inner(js, is_module, label);
-  if (js.length * 2 <= REWRITE_CACHE_MAX_BYTES / 4) {
-    cache.set(js, result);
-    rewrite_cache_bytes += (js.length + result.length) * 2;
-    while (rewrite_cache_bytes > REWRITE_CACHE_MAX_BYTES) {
-      let victim = rewrite_caches[0].size >= rewrite_caches[1].size ? rewrite_caches[0] : rewrite_caches[1];
-      let oldest = victim.keys().next();
-      if (oldest.done) break;
-      rewrite_cache_bytes -= (oldest.value.length + victim.get(oldest.value).length) * 2;
-      victim.delete(oldest.value);
-    }
-  }
+  remember_rewrite(js, is_module, result);
   return result;
+}
+
+function remember_rewrite(js, is_module, result) {
+  let cache = rewrite_caches[is_module ? 1 : 0];
+  if (js.length * 2 > REWRITE_CACHE_MAX_BYTES / 4) return;
+  if (cache.has(js)) return;
+  cache.set(js, result);
+  rewrite_cache_bytes += (js.length + result.length) * 2;
+  while (rewrite_cache_bytes > REWRITE_CACHE_MAX_BYTES) {
+    let victim = rewrite_caches[0].size >= rewrite_caches[1].size ? rewrite_caches[0] : rewrite_caches[1];
+    let oldest = victim.keys().next();
+    if (oldest.done) break;
+    rewrite_cache_bytes -= (oldest.value.length + victim.get(oldest.value).length) * 2;
+    victim.delete(oldest.value);
+  }
+}
+
+export function seed_rewrite(js, is_module, result) {
+  if (typeof js !== "string" || typeof result !== "string") return;
+  remember_rewrite(js, !!is_module, result);
+}
+
+export function is_rewrite_cached(js, is_module = false) {
+  return rewrite_caches[is_module ? 1 : 0].has(js);
+}
+
+export function compute_rewrite(js, is_module = false, label = "") {
+  return cached_rewrite(js, is_module, label);
+}
+
+let signature_value = null;
+let signature_size = -1;
+
+export function rewrite_signature() {
+  if (signature_value !== null && signature_size === ctx_vars.length) return signature_value;
+  let text = ctx_vars.join(",") + "|" + unreadable_vars.join(",");
+  let hash = 2166136261;
+  for (let i = 0; i < text.length; i++) {
+    hash ^= text.charCodeAt(i);
+    hash = Math.imul(hash, 16777619) >>> 0;
+  }
+  signature_size = ctx_vars.length;
+  signature_value = hash.toString(36) + "." + ctx_vars.length;
+  return signature_value;
 }
 
 function fast_can_parse(js, is_module) {

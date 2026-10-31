@@ -187,23 +187,37 @@ export function set_host(frame, msg_port) {
   msg_target.postMessage(msg, {targetOrigin: "*", transfer: [msg_port]})
 }
 
-export async function wait_on_frame(frame) {
+export async function wait_on_frame(frame, timeout_ms = 0) {
   let resolved = false;
-
-  globalThis.addEventListener("message", (event) => {
+  let listener = (event) => {
     let msg = event.data;
-    if (msg.type === "pong") 
-      resolved = true;
-  });
-  
-  while (!resolved) {
-    let msg = {
-      type: "ping",
-      id: Math.random() + ""
-    };
-    frame.contentWindow.postMessage(msg, "*");
-    await new Promise(r => setTimeout(r, 50));
+    if (!msg || msg.type !== "pong") return;
+    if (frame.contentWindow && event.source !== frame.contentWindow) return;
+    resolved = true;
+  };
+  globalThis.addEventListener("message", listener);
+
+  let started = performance.now();
+  let delay = 20;
+  try {
+    while (!resolved) {
+      if (timeout_ms > 0 && performance.now() - started > timeout_ms) return false;
+      try {
+        let msg = {
+          type: "ping",
+          id: Math.random() + ""
+        };
+        frame.contentWindow.postMessage(msg, "*");
+      }
+      catch {}
+      await new Promise(r => setTimeout(r, delay));
+      delay = Math.min(delay * 1.5, 100);
+    }
   }
+  finally {
+    globalThis.removeEventListener("message", listener);
+  }
+  return true;
 }
 
 function host_set_handler(event) {

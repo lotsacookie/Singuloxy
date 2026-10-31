@@ -1,3 +1,4 @@
+import * as rpc from "../../rpc.mjs";
 import { quiet_error, quiet_warn, yield_to_main } from "../../util.mjs";
 import * as network from "../network.mjs";
 import * as loader from "../loader.mjs";
@@ -52,12 +53,95 @@ export function execute_script(script_element, script_text) {
   swap_current_script(previous);
 }
 
-async function prewarm(script_element, text) {
+const rpc_cache_get = rpc.create_rpc_wrapper(rpc.host, "rewrite_cache_get");
+const rpc_cache_put = rpc.create_rpc_wrapper(rpc.host, "rewrite_cache_put");
+
+const PUT_FLUSH_MS = 1500;
+const PUT_BATCH_ITEMS = 6;
+const PUT_BATCH_CHARS = 12 * 1024 * 1024;
+
+const prewarm_tasks = new Set();
+let queued_puts = [];
+let put_timer = null;
+
+function hex_of(buffer) {
+  let bytes = new Uint8Array(buffer);
+  let out = "";
+  for (let i = 0; i < bytes.length; i++) out += bytes[i].toString(16).padStart(2, "0");
+  return out;
+}
+
+async function content_key(text) {
   try {
+    if (!globalThis.crypto || !globalThis.crypto.subtle) return null;
+    let digest = await globalThis.crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
+    let build = loader.version ? (loader.version.hash || loader.version.ver || "0") : "0";
+    return build + ":" + parser.rewrite_signature() + ":" + hex_of(digest);
+  }
+  catch {
+    return null;
+  }
+}
+
+async function flush_puts() {
+  put_timer = null;
+  let items = queued_puts;
+  queued_puts = [];
+  while (items.length) {
+    let batch = [];
+    let chars = 0;
+    while (items.length && batch.length < PUT_BATCH_ITEMS && (batch.length === 0 || chars + items[0].value.length <= PUT_BATCH_CHARS)) {
+      let item = items.shift();
+      chars += item.value.length;
+      batch.push(item);
+    }
+    try {
+      await rpc_cache_put(batch);
+    }
+    catch {}
     await yield_to_main();
-    parser.rewrite_js(text, false, script_element.getAttribute("__src") || "");
+  }
+}
+
+function queue_put(key, value) {
+  queued_puts.push({key: key, value: value});
+  if (put_timer === null) put_timer = setTimeout(flush_puts, PUT_FLUSH_MS);
+}
+
+async function run_prewarm(script_element, text) {
+  try {
+    if (parser.is_rewrite_cached(text, false)) return;
+    let key = await content_key(text);
+    if (key) {
+      let found = null;
+      try {
+        found = await rpc_cache_get([key]);
+      }
+      catch {}
+      let value = found ? found[key] : null;
+      if (typeof value === "string" && value.length > 0) {
+        parser.seed_rewrite(text, false, value);
+        return;
+      }
+    }
+    await yield_to_main();
+    let result = parser.compute_rewrite(text, false, script_element.getAttribute("__src") || "");
+    if (key && result !== text) queue_put(key, result);
   }
   catch {}
+}
+
+function prewarm(script_element, text) {
+  let task = run_prewarm(script_element, text).then(() => {
+    prewarm_tasks.delete(task);
+  });
+  prewarm_tasks.add(task);
+}
+
+export async function wait_for_prewarms() {
+  while (prewarm_tasks.size > 0) {
+    await Promise.all([...prewarm_tasks]);
+  }
 }
 
 function sleep(ms) {
