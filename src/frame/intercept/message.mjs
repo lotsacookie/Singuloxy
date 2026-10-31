@@ -52,12 +52,54 @@ function install_origin_marker() {
   catch {}
 }
 
+let trace_count = 0;
+
+function trace(text) {
+  if (trace_count >= 60) return;
+  trace_count++;
+  try {
+    console.warn("sandstone: " + text);
+  }
+  catch {}
+}
+
+function describe_data(data) {
+  if (data === null || data === undefined) return String(data);
+  if (typeof data === "string") return "string(" + data.length + ")";
+  if (typeof data === "object") {
+    try {
+      return "object{" + Object.keys(data).slice(0, 8).join(",") + "}";
+    }
+    catch {
+      return "object";
+    }
+  }
+  return typeof data;
+}
+
+function install_trace() {
+  try {
+    globalThis.addEventListener("message", (event) => {
+      let from = "";
+      try {
+        from = event.origin;
+      }
+      catch {}
+      trace("message received origin=" + from + " data=" + describe_data(event.data));
+    }, true);
+  }
+  catch {}
+}
+
 function install_post_message() {
   if (typeof globalThis.postMessage !== "function") return;
   try {
     proxy_function(globalThis, "postMessage", (func, this_arg, args) => {
       let receiver = unwrap_this(this_arg);
-      let next = is_same_origin_window(receiver) ? normalize_arguments(args) : args;
+      let same = is_same_origin_window(receiver);
+      let next = same ? normalize_arguments(args) : args;
+      if (next !== args) trace("postMessage retarget " + String(args[1] && args[1].targetOrigin || args[1]) + " -> * data=" + describe_data(args[0]));
+      else if (!same) trace("postMessage to cross-origin window data=" + describe_data(args[0]));
       return Reflect.apply(func, receiver, next);
     });
   }
@@ -98,4 +140,5 @@ if (!IN_WORKER && typeof window !== "undefined") {
   install_origin_marker();
   install_post_message();
   install_event_origin();
+  install_trace();
 }

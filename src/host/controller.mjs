@@ -431,11 +431,16 @@ rpc.rpc_handlers["navigate"] = async (frame_id, url, reload=true, form_data=null
 
 rpc.rpc_handlers["console"] = async (frame_id, batch) => {
   let frame = iframes[frame_id];
+  let nested = false;
+  if (!frame) {
+    frame = Object.values(iframes)[0];
+    nested = true;
+  }
   if (!frame || !Array.isArray(batch)) return;
   let clean = [];
   for (let item of batch.slice(0, 200)) {
     if (Array.isArray(item) && typeof item[1] === "string") {
-      clean.push([typeof item[0] === "string" ? item[0] : "log", item[1].slice(0, 4000)]);
+      clean.push([typeof item[0] === "string" ? item[0] : "log", (nested ? "[nested] " : "") + item[1].slice(0, 4000)]);
     }
   }
   if (!clean.length) return;
