@@ -1118,7 +1118,13 @@ async function fetch_with_retry(url, options, ignore_block = false, use_session 
         identity_now = true;
         options = with_header(options, "Accept-Encoding", "identity");
         options = {...options, _libcurl_verbose: 1, _libcurl_http_version: 1.1};
-        quiet_warn(`sandstone host: partial transfer, retrying with identity encoding ${url}`);
+        if (method === "HEAD") {
+          // libcurl waits for a body on a HEAD reply that carries Content-Length, then fails with
+          // error 18. Retry as a GET instead; the caller still treats the reply as bodyless
+          // because it keys off the original method.
+          options.method = "GET";
+        }
+        quiet_warn(`sandstone host: partial transfer, retrying${method === "HEAD" ? " HEAD as GET" : ""} with identity encoding ${url}`);
       }
       let retryable = can_retry ? is_transient(e) : PRE_REQUEST_ERRORS.test(message);
       if (identity_now) retryable = true;
