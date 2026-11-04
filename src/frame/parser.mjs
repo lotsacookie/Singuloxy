@@ -33,7 +33,10 @@ const acorn_module_attempts = [
 ];
 
 const MAX_VALIDATE_LENGTH = 8 * 1024 * 1024;
+const MAX_REPAIR_ROUNDS = 24;
 const MODULE_SYNTAX = /(^|[\n;{}])\s*(import\s*[\w{*"']|export\s+[\w{*])/;
+
+let last_parse = null;
 
 function parse_js(js, is_module) {
   let attempts = is_module ? module_parse_attempts : script_parse_attempts;
@@ -41,7 +44,9 @@ function parse_js(js, is_module) {
 
   for (let options of attempts) {
     try {
-      return meriyah.parse(js, {ranges: true, ...options});
+      let ast = meriyah.parse(js, {ranges: true, ...options});
+      last_parse = {kind: "meriyah", options: options};
+      return ast;
     }
     catch (e) {
       errors.push(e);
@@ -51,6 +56,7 @@ function parse_js(js, is_module) {
   for (let options of is_module ? acorn_module_attempts : acorn_script_attempts) {
     try {
       let ast = acorn.parse(js, options);
+      last_parse = {kind: "acorn", options: options};
       console.warn("sandstone: meriyah could not parse this script but acorn could, using acorn:", errors.length ? String(errors[0]?.message ?? errors[0]).slice(0, 160) : "");
       return ast;
     }
@@ -388,20 +394,96 @@ function rewrite_js_inner(js, is_module = false, label = "") {
   astray.walk(ast, ast_visitor);
   ast_visitor.rewrites.sort((a, b) => a.pos - b.pos);
 
-  let rewritten_js = "";
-  let prev_offset = 0;
-  for (let rewrite of ast_visitor.rewrites) {
-    rewritten_js += js.substring(prev_offset, rewrite.pos);
-    let [replacement, offset] = gen_rewrite_code(rewrite);
-    rewritten_js += replacement;
-    prev_offset = offset;
-  }
-  rewritten_js += js.substring(prev_offset);
-
-  let result = rewritten_js || js;
+  let parsed_with = last_parse;
+  let built = build_output(js, ast_visitor.rewrites);
+  let result = built.code || js;
   if (ast_visitor.rewrites.length > 0 && js.length <= MAX_VALIDATE_LENGTH && !fast_can_parse(result, is_module)) {
-    console.warn(`sandstone: rewriting produced invalid JS, script left UNREWRITTEN (it will bypass the proxy): ${label || "(inline or unnamed script)"}`);
-    return js;
+    let repaired = repair_rewrites(js, built, is_module, label, parsed_with);
+    if (repaired === null) {
+      console.warn(`sandstone: rewriting produced invalid JS and could not be repaired, script left UNREWRITTEN (it will bypass the proxy): ${label || "(inline or unnamed script)"}`);
+      return js;
+    }
+    return repaired;
   }
   return result;
+}
+
+function build_output(js, rewrites) {
+  let code = "";
+  let prev_offset = 0;
+  let spans = [];
+  for (let rewrite of rewrites) {
+    if (rewrite.pos < prev_offset) continue;
+    code += js.substring(prev_offset, rewrite.pos);
+    let start = code.length;
+    let [replacement, offset] = gen_rewrite_code(rewrite);
+    code += replacement;
+    spans.push({rewrite: rewrite, start: start, end: code.length});
+    prev_offset = offset;
+  }
+  code += js.substring(prev_offset);
+  return {code: code, spans: spans};
+}
+
+function parse_error_position(code, parsed_with) {
+  if (!parsed_with) return null;
+  try {
+    if (parsed_with.kind === "meriyah") meriyah.parse(code, parsed_with.options);
+    else acorn.parse(code, parsed_with.options);
+  }
+  catch (e) {
+    let index = locate_error(code, e);
+    return typeof index === "number" && Number.isFinite(index) ? index : null;
+  }
+  return null;
+}
+
+function find_culprit(js, built, is_module, parsed_with, use_bisect) {
+  let list = built.spans.map((span) => span.rewrite);
+  if (list.length === 0) return null;
+
+  if (!use_bisect) {
+    let position = parse_error_position(built.code, parsed_with);
+    if (position !== null) {
+      let found = null;
+      for (let span of built.spans) {
+        if (span.start <= position) found = span.rewrite;
+        else break;
+      }
+      if (found) return found;
+    }
+  }
+
+  let valid = 0;
+  let invalid = list.length;
+  while (invalid - valid > 1) {
+    let mid = (valid + invalid) >> 1;
+    if (fast_can_parse(build_output(js, list.slice(0, mid)).code, is_module)) valid = mid;
+    else invalid = mid;
+  }
+  return list[invalid - 1];
+}
+
+function describe_rewrite(js, rewrite) {
+  let from = Math.max(0, rewrite.pos - 60);
+  let near = js.slice(from, rewrite.pos + 60).replace(/\s+/g, " ");
+  return `${rewrite.type}${rewrite.name ? " " + rewrite.name : ""} at offset ${rewrite.pos} near: ${near}`;
+}
+
+function repair_rewrites(js, built, is_module, label, parsed_with) {
+  let dropped = [];
+  let current = built;
+  for (let round = 0; round < MAX_REPAIR_ROUNDS; round++) {
+    let culprit = find_culprit(js, current, is_module, parsed_with, round >= 3);
+    if (!culprit) return null;
+    dropped.push(culprit);
+    let remaining = current.spans.map((span) => span.rewrite).filter((rewrite) => rewrite !== culprit);
+    if (remaining.length === 0) return null;
+    current = build_output(js, remaining);
+    if (fast_can_parse(current.code, is_module)) {
+      console.warn(`sandstone: dropped ${dropped.length} rewrite(s) that produced invalid JS in ${label || "(inline or unnamed script)"}: ${dropped.map((rewrite) => describe_rewrite(js, rewrite)).join(" | ")}`);
+      return current.code;
+    }
+  }
+  return null;
 }
