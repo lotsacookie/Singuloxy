@@ -87,6 +87,46 @@ export function quiet_warn(...args) {
   console.warn(...args);
 }
 
+function has_gzip_magic(bytes) {
+  return bytes.length > 2 && bytes[0] === 0x1f && bytes[1] === 0x8b && bytes[2] === 0x08;
+}
+
+export async function gunzip_bytes(bytes) {
+  if (typeof DecompressionStream !== "function") return null;
+  try {
+    let stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream("gzip"));
+    return new Uint8Array(await new Response(stream).arrayBuffer());
+  }
+  catch {
+    return null;
+  }
+}
+
+export async function response_text(response) {
+  let bytes = new Uint8Array(await response.arrayBuffer());
+  let decompressed = false;
+  if (has_gzip_magic(bytes)) {
+    let unzipped = await gunzip_bytes(bytes);
+    if (unzipped) {
+      bytes = unzipped;
+      decompressed = true;
+    }
+  }
+  return {text: new TextDecoder("utf-8").decode(bytes), decompressed: decompressed};
+}
+
+export function strip_gz_suffix(url) {
+  try {
+    let url_obj = new URL(url);
+    if (!/\.gz$/i.test(url_obj.pathname)) return null;
+    url_obj.pathname = url_obj.pathname.replace(/\.gz$/i, "");
+    return url_obj.href;
+  }
+  catch {
+    return null;
+  }
+}
+
 export function yield_to_main() {
   if (globalThis.scheduler && typeof globalThis.scheduler.yield === "function") return globalThis.scheduler.yield();
   return new Promise((resolve) => setTimeout(resolve, 0));

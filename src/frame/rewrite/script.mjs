@@ -1,5 +1,5 @@
 import * as rpc from "../../rpc.mjs";
-import { quiet_error, quiet_warn, yield_to_main } from "../../util.mjs";
+import { quiet_error, quiet_warn, yield_to_main, response_text, strip_gz_suffix } from "../../util.mjs";
 import * as network from "../network.mjs";
 import * as loader from "../loader.mjs";
 import * as parser from "../parser.mjs";
@@ -218,12 +218,23 @@ export async function rewrite_script(script_element) {
       try {
         let response = await network.fetch(src_url);
         if (response.ok === false) {
-          last_error = new Error("status " + response.status);
-          break;
+          let alternate = strip_gz_suffix(src_url);
+          if (alternate) {
+            try {
+              let alternate_response = await network.fetch(alternate);
+              if (alternate_response.ok !== false) response = alternate_response;
+            }
+            catch {}
+          }
+          if (response.ok === false) {
+            last_error = new Error("status " + response.status);
+            break;
+          }
         }
-        let text = await response.text();
+        let decoded = await response_text(response);
+        let text = decoded.text;
         let garbled = looks_garbled(text);
-        let problem = garbled ? "response does not look like JavaScript text" : size_problem(response, text);
+        let problem = garbled ? "response does not look like JavaScript text" : decoded.decompressed ? null : size_problem(response, text);
         if (problem && !final_attempt) {
           quiet_warn(`sandstone: script download looks wrong (${problem}), retrying (${attempt}/${SCRIPT_DOWNLOAD_ATTEMPTS - 1}):`, src_url);
           last_error = new Error(problem);

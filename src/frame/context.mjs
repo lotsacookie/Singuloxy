@@ -141,12 +141,26 @@ function assign_handler_value(obj, target, key, value) {
   }
 }
 
+const INHERITED_OBJECT_KEYS = new Set([
+  "constructor",
+  "toString",
+  "toLocaleString",
+  "valueOf",
+  "hasOwnProperty",
+  "isPrototypeOf",
+  "propertyIsEnumerable",
+  "__defineGetter__",
+  "__defineSetter__",
+  "__lookupGetter__",
+  "__lookupSetter__"
+]);
+
 export function create_obj_proxy(obj, ctx_vars, target) {
   let proxies = new Map();
 
   return new Proxy(target, {
     get: (_, key) => {
-      if (typeof obj[key] !== "undefined")
+      if (!INHERITED_OBJECT_KEYS.has(key) && typeof obj[key] !== "undefined")
         return obj[key];
       if (typeof target[key] === "function" && !target[key].prototype) {
         if (!proxies.has(key)) 
