@@ -1085,6 +1085,7 @@ async function fetch_with_retry_inner(url, options, ignore_block = false, use_se
   let attempt = 0;
   let roblox_cdn = is_roblox_cdn(url);
   let forbidden_retries = 0;
+  let csrf_retries = 0;
   let identity_forced = false;
   if (roblox_cdn) options = with_roblox_referer(options);
 
@@ -1126,7 +1127,17 @@ async function fetch_with_retry_inner(url, options, ignore_block = false, use_se
             : keep_headers(options, ["user-agent", "range"]);
         continue;
       }
-      if (/^auth\.roblox\.com$/i.test(host_of(url)) || /auth-token-service|proof-of-work-service|rotating-client-service|\/v1\/users\/authenticated|\/v2\/captcha|\/challenge\//i.test(url)) {
+      if (response.status === 403 && csrf_retries < 1 && method !== "GET" && method !== "HEAD" && /(^|\.)roblox\.com$/i.test(host_of(url))) {
+        let fresh = response.headers.get("x-csrf-token");
+        let sent = Object.entries(options?.headers || {}).find(([name]) => name.toLowerCase() === "x-csrf-token");
+        if (fresh && (!sent || String(sent[1]) !== fresh)) {
+          csrf_retries++;
+          discard_response(response);
+          options = with_header(options, "X-CSRF-TOKEN", fresh);
+          continue;
+        }
+      }
+      if (/^auth\.roblox\.com$/i.test(host_of(url)) || /analytics-query-gateway|auth-token-service|proof-of-work-service|rotating-client-service|\/v1\/users\/authenticated|\/v2\/captcha|\/challenge\//i.test(url)) {
         let hv = (name) => response.headers.get(name);
         let sent_csrf = Object.keys(options?.headers || {}).some((key) => key.toLowerCase() === "x-csrf-token");
         let detail = "";

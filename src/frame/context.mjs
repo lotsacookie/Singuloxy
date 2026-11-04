@@ -253,6 +253,12 @@ export class CustomCTX {
       return safe_frame(globalThis.parent, this);
     return this.__proxy__;
   }
+  get opener() {
+    if (is_worker) return undefined;
+    let real = globalThis.opener;
+    if (!real) return null;
+    return safe_frame(real, this);
+  }
   get top() {
     if (is_worker) return undefined;
     if (loader.is_iframe)
