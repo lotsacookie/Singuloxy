@@ -378,6 +378,22 @@ function normalize_wisp(url) {
   return trimmed.endsWith("/") ? trimmed : trimmed + "/";
 }
 
+let onion_wisp = null;
+
+export function set_onion_wisp(url) {
+  onion_wisp = normalize_wisp(url);
+  return onion_wisp;
+}
+
+export function is_onion_host(host) {
+  return typeof host === "string" && /(^|\.)onion\.?$/i.test(host);
+}
+
+function onion_url(url) {
+  if (typeof url !== "string" || !/^https:\/\/[^/?#]*\.onion\.?(?::\d+)?([/?#]|$)/i.test(url)) return url;
+  return "http://" + url.slice(8).replace(/:443(?=[/?#]|$)/, "");
+}
+
 export function set_wisp_pool(urls) {
   wisp_pool = [];
   for (let url of Array.isArray(urls) ? urls : []) {
@@ -464,7 +480,7 @@ function install_balanced_transport() {
       let host = target.slice(0, target.lastIndexOf(":")).toLowerCase();
       let chosen = default_wisp;
       try {
-        chosen = pick_wisp(host, default_wisp);
+        chosen = is_onion_host(host) && onion_wisp ? onion_wisp : pick_wisp(host, default_wisp);
       }
       catch {}
       super(chosen + target, protocols);
@@ -1083,6 +1099,7 @@ async function fetch_with_retry_inner(url, options, ignore_block = false, use_se
   let method = String(options?.method || "GET").toUpperCase();
   let can_retry = method === "GET" || method === "HEAD";
   let attempt = 0;
+  url = onion_url(url);
   let roblox_cdn = is_roblox_cdn(url);
   let forbidden_retries = 0;
   let csrf_retries = 0;
