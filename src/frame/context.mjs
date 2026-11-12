@@ -155,8 +155,24 @@ const INHERITED_OBJECT_KEYS = new Set([
   "__lookupSetter__"
 ]);
 
+const MISS_LIMIT = 40;
+const misses = new Map();
+
+export function recent_misses() {
+  return Array.from(misses.keys());
+}
+
+function note_miss(label, key) {
+  if (typeof key !== "string" || key.length > 60) return;
+  let name = label + "." + key;
+  misses.delete(name);
+  misses.set(name, true);
+  if (misses.size > MISS_LIMIT) misses.delete(misses.keys().next().value);
+}
+
 export function create_obj_proxy(obj, ctx_vars, target) {
   let proxies = new Map();
+  let label = target === globalThis ? "window" : "document";
 
   return new Proxy(target, {
     get: (_, key) => {
@@ -167,7 +183,9 @@ export function create_obj_proxy(obj, ctx_vars, target) {
           proxies.set(key, create_func_proxy(target, target[key]))
         return proxies.get(key)
       }
-      return target[key];
+      let value = target[key];
+      if (value === undefined) note_miss(label, key);
+      return value;
     },
     set: (_, key, value) => {
       try {
