@@ -63,6 +63,7 @@ function install_console() {
   if (console_installed) return;
   console_installed = true;
   try {
+    console_push("log", "sandstone: diag hook v3 active");
     for (let method of ["log", "info", "warn", "error", "debug"]) {
       let original = console[method];
       console[method] = function(...args) {
@@ -81,7 +82,12 @@ function install_console() {
           return;
         }
         console_push("error", (event.message || "Error") + (event.filename ? ` (${event.filename}:${event.lineno}:${event.colno})` : ""));
-        report_call(event.message, event.error && event.error.stack);
+        try {
+          report_call(event.message, event.error && event.error.stack, (line) => console_push("warn", line));
+        }
+        catch (e) {
+          console_push("warn", "sandstone: diag failed: " + (e && e.message));
+        }
       }
       catch {}
     }, true);
@@ -89,7 +95,12 @@ function install_console() {
       try {
         console_push("error", "Unhandled rejection: " + console_format(event.reason));
         let reason = event.reason;
-        report_call(reason && reason.message ? reason.message : reason, reason && reason.stack);
+        try {
+          report_call(reason && reason.message ? reason.message : reason, reason && reason.stack, (line) => console_push("warn", line));
+        }
+        catch (e) {
+          console_push("warn", "sandstone: diag failed: " + (e && e.message));
+        }
       }
       catch {}
     });

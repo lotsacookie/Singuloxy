@@ -28,14 +28,16 @@ if (typeof document !== "undefined" && typeof globalThis.addEventListener === "f
 }
 
 let reported_calls = new Set();
-export function report_call(message, stack) {
+export function report_call(message, stack, emit) {
+    emit = emit || ((line) => console.warn(line));
     let text = String(message || "");
     if (!/is not a function/.test(text) || reported_calls.has(text) || reported_calls.size > 20) return;
+    emit("sandstone: diag matched: " + text.slice(0, 120));
     reported_calls.add(text);
     let trimmed = String(stack || "").split("\n").slice(0, 6).map((line) => line.trim().slice(0, 160)).join(" | ");
-    console.warn("sandstone: " + text + " | recent undefined lookups: " + recent_misses().slice(-15).join(", "));
-    console.warn("sandstone: deep trace for '" + text + "' | misses with call sites: " + recent_misses_detailed(25).join(" ;; "));
-    if (trimmed) console.warn("sandstone: stack head: " + trimmed);
+    emit("sandstone: " + text + " | recent undefined lookups: " + recent_misses().slice(-15).join(", "));
+    emit("sandstone: deep trace for '" + text + "' | misses with call sites: " + recent_misses_detailed(25).join(" ;; "));
+    if (trimmed) emit("sandstone: stack head: " + trimmed);
     try {
       let nav = globalThis.navigator;
       let probe = {
@@ -56,7 +58,7 @@ export function report_call(message, stack) {
         PerformanceObserver: typeof globalThis.PerformanceObserver,
         ServiceWorkerContainer: typeof globalThis.ServiceWorkerContainer
       };
-      console.warn("sandstone: env probe " + JSON.stringify(probe));
+      emit("sandstone: env probe " + JSON.stringify(probe));
     }
     catch {}
   }
