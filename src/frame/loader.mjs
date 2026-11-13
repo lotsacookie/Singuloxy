@@ -9,6 +9,7 @@ import { pending_scripts, script_state, execute_script, wait_for_prewarms } from
 import { pending_modules } from "./rewrite/module.mjs";
 import { install_form_handler, patch_form_submit } from "./rewrite/form.mjs";
 import { set_ready_state } from "./intercept/document.mjs";
+import { report_call } from "./intercept/diagnostics.mjs";
 
 const navigate_rpc = rpc.create_rpc_wrapper(rpc.host, "navigate");
 export const local_storage = rpc.create_rpc_wrapper(rpc.host, "local_storage");
@@ -80,12 +81,15 @@ function install_console() {
           return;
         }
         console_push("error", (event.message || "Error") + (event.filename ? ` (${event.filename}:${event.lineno}:${event.colno})` : ""));
+        report_call(event.message, event.error && event.error.stack);
       }
       catch {}
     }, true);
     window.addEventListener("unhandledrejection", (event) => {
       try {
         console_push("error", "Unhandled rejection: " + console_format(event.reason));
+        let reason = event.reason;
+        report_call(reason && reason.message ? reason.message : reason, reason && reason.stack);
       }
       catch {}
     });

@@ -27,9 +27,8 @@ if (typeof document !== "undefined" && typeof globalThis.addEventListener === "f
   }, true);
 }
 
-if (typeof globalThis.addEventListener === "function") {
-  let reported_calls = new Set();
-  let report_call = (message, stack) => {
+let reported_calls = new Set();
+export function report_call(message, stack) {
     let text = String(message || "");
     if (!/is not a function/.test(text) || reported_calls.has(text) || reported_calls.size > 20) return;
     reported_calls.add(text);
@@ -60,7 +59,9 @@ if (typeof globalThis.addEventListener === "function") {
       console.warn("sandstone: env probe " + JSON.stringify(probe));
     }
     catch {}
-  };
+  }
+
+if (typeof globalThis.addEventListener === "function") {
   globalThis.addEventListener("unhandledrejection", (event) => {
     let reason = event && event.reason;
     report_call(reason && reason.message ? reason.message : reason, reason && reason.stack);
