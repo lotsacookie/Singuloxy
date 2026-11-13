@@ -155,18 +155,41 @@ const INHERITED_OBJECT_KEYS = new Set([
   "__lookupSetter__"
 ]);
 
-const MISS_LIMIT = 40;
+const MISS_LIMIT = 200;
 const misses = new Map();
 
 export function recent_misses() {
   return Array.from(misses.keys());
 }
 
+export function recent_misses_detailed(count) {
+  let out = [];
+  for (let [name, info] of misses) out.push(name + (info && info.where ? " @ " + info.where : "") + (info && info.hits > 1 ? " x" + info.hits : ""));
+  return out.slice(-count);
+}
+
+function miss_site() {
+  try {
+    let lines = String(new Error().stack || "").split("\n").slice(3, 7);
+    for (let line of lines) {
+      if (line.includes("sandstone") || /dist\/|context\.mjs/.test(line)) continue;
+      return line.trim().slice(0, 140);
+    }
+    return (lines[0] || "").trim().slice(0, 140);
+  }
+  catch {
+    return "";
+  }
+}
+
 function note_miss(label, key) {
   if (typeof key !== "string" || key.length > 60) return;
   let name = label + "." + key;
+  let prev = misses.get(name);
+  let info = prev && typeof prev === "object" ? prev : {hits: 0, where: miss_site()};
+  info.hits++;
   misses.delete(name);
-  misses.set(name, true);
+  misses.set(name, info);
   if (misses.size > MISS_LIMIT) misses.delete(misses.keys().next().value);
 }
 
